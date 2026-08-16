@@ -17,6 +17,7 @@
 #define MYE_CORE_LOG_H
 
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 
 typedef enum mye_log_level {
@@ -36,7 +37,11 @@ typedef void (*mye_log_sink_fn)(mye_log_level level, const char *source,
 void mye_log_set_level(mye_log_level level);
 mye_log_level mye_log_get_level(void);
 
-/* NULL restores the default sink (stderr, with a level and source prefix). */
+/* NULL restores the default sink (stderr, with a level and source prefix).
+ *
+ * THREADING: a sink may be called from any thread -- raylib logs from asset
+ * workers -- so it must be thread-safe. The default sink is, because stdio
+ * locks per stream. Set the sink before starting threads. */
 void mye_log_set_sink(mye_log_sink_fn sink, void *user);
 
 /* Routes raylib's TraceLog and flecs' ecs_os_api logging here. Called by
@@ -56,7 +61,13 @@ void mye_log_writev(mye_log_level level, const char *source, const char *fmt,
 #define mye_log_error(...) mye_log_write(MYE_LOG_ERROR, "engine", __VA_ARGS__)
 
 /* Counts since startup, for the debug overlay and for tests that assert an
- * operation produced no warnings. */
+ * operation produced no warnings.
+ *
+ * Returned by value as plain integers; the storage behind them is atomic
+ * because raylib logs from worker threads -- LoadImage on the asset pool is
+ * enough to race these. Per the primitive policy in plan/05-concurrency.md
+ * this is the atomics case: counters, several writers, and a stale read is
+ * harmless. */
 typedef struct mye_log_counts {
     unsigned trace, debug, info, warn, error;
 } mye_log_counts;

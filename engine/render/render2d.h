@@ -60,6 +60,31 @@ typedef struct MyeSpriteAnim {
     bool finished;
 } MyeSpriteAnim;
 
+/* Opt-in smoothing between fixed simulation steps.
+ *
+ * The simulation advances in fixed 1/60 s jumps while the display may refresh
+ * at any rate, so most drawn frames fall *between* two simulated states.
+ * Adding this component makes the renderer blend between the previous and
+ * current position using MyeTime.alpha, which removes the judder that would
+ * otherwise show on a high-refresh display.
+ *
+ * Deliberately opt-in per entity. With it on by default an entity's rendered
+ * position would silently stop matching its MyePosition2D value, and someone
+ * comparing the component in the flecs Explorer against the screen would find
+ * a discrepancy with no visible cause. The engine should not diverge data
+ * from pixels behind your back.
+ *
+ * The previous position is maintained by the engine; do not write it. Call
+ * mye_transform_snap() after teleporting an entity, or the blend will smear
+ * it across the screen -- a screen wrap from x=1270 to x=10 draws a streak
+ * through everything in between. */
+typedef struct MyeInterpolate {
+    /* Engine-maintained: position at the start of the last fixed step. */
+    float prev_x, prev_y;
+    /* Set by mye_transform_snap(); consumed and cleared by the next step. */
+    bool snap;
+} MyeInterpolate;
+
 /* Tag: skip this entity when drawing. */
 typedef struct MyeHidden {
     char unused;
@@ -82,11 +107,18 @@ extern ECS_COMPONENT_DECLARE(MyeRotation2D);
 extern ECS_COMPONENT_DECLARE(MyeScale2D);
 extern ECS_COMPONENT_DECLARE(MyeSprite);
 extern ECS_COMPONENT_DECLARE(MyeSpriteAnim);
+extern ECS_COMPONENT_DECLARE(MyeInterpolate);
 extern ECS_COMPONENT_DECLARE(MyeHidden);
 extern ECS_COMPONENT_DECLARE(MyeCamera2D);
 extern ECS_COMPONENT_DECLARE(MyeRenderConfig);
 
 void MyeRender2dModuleImport(ecs_world_t *world);
+
+/* Suppresses interpolation for this entity on the next frame. Call it
+ * whenever you move an entity discontinuously -- teleports, respawns, screen
+ * wraps -- so the renderer does not draw the journey. No-op on entities that
+ * are not interpolated. */
+void mye_transform_snap(ecs_world_t *world, ecs_entity_t entity);
 
 /* Rect of `index` within a grid whose frame 0 is `first_frame`. Pure: the
  * animation systems are built on this, and so are the tests. */

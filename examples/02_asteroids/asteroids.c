@@ -219,12 +219,17 @@ static void build_prefabs(ecs_world_t *world, GameState *state)
 
 /* ------------------------------------------------------------- spawning -- */
 
-static void wrap_position(MyePosition2D *p)
+/* Returns true if the entity was teleported across the screen. Interpolated
+ * entities must be snapped when that happens, or the renderer blends from
+ * one edge to the other and draws a streak through everything between. */
+static bool wrap_position(MyePosition2D *p)
 {
-    if (p->x < 0.0f) p->x += (float)SCREEN_W;
-    if (p->x > (float)SCREEN_W) p->x -= (float)SCREEN_W;
-    if (p->y < 0.0f) p->y += (float)SCREEN_H;
-    if (p->y > (float)SCREEN_H) p->y -= (float)SCREEN_H;
+    bool wrapped = false;
+    if (p->x < 0.0f) { p->x += (float)SCREEN_W; wrapped = true; }
+    if (p->x > (float)SCREEN_W) { p->x -= (float)SCREEN_W; wrapped = true; }
+    if (p->y < 0.0f) { p->y += (float)SCREEN_H; wrapped = true; }
+    if (p->y > (float)SCREEN_H) { p->y -= (float)SCREEN_H; wrapped = true; }
+    return wrapped;
 }
 
 static ecs_entity_t spawn_ship(ecs_world_t *world, const GameState *state)
@@ -235,6 +240,8 @@ static ecs_entity_t spawn_ship(ecs_world_t *world, const GameState *state)
     ecs_set(world, e, MyePosition2D, { SCREEN_W * 0.5f, SCREEN_H * 0.5f });
     ecs_set(world, e, MyeRotation2D, { -PI * 0.5f }); /* nose up */
     ecs_set(world, e, Velocity, { 0.0f, 0.0f });
+    /* Opt in to smoothing: the ship is the thing a player watches most. */
+    ecs_set(world, e, MyeInterpolate, { 0 });
     return e;
 }
 
@@ -252,6 +259,7 @@ static void spawn_rock(ecs_world_t *world, GameState *state, int size, float x,
     ecs_set(world, e, MyePosition2D, { x, y });
     ecs_set(world, e, MyeRotation2D, { 0.0f });
     ecs_set(world, e, Velocity, { cosf(angle) * speed, sinf(angle) * speed });
+    ecs_set(world, e, MyeInterpolate, { 0 });
     ++state->rocks_alive;
 }
 
@@ -374,7 +382,9 @@ static void MoveAndWrap(ecs_iter_t *it)
     for (int i = 0; i < it->count; ++i) {
         pos[i].x += vel[i].x * dt;
         pos[i].y += vel[i].y * dt;
-        wrap_position(&pos[i]);
+        if (wrap_position(&pos[i])) {
+            mye_transform_snap(it->world, it->entities[i]);
+        }
     }
 }
 
@@ -529,6 +539,8 @@ static void RocksHitShip(ecs_iter_t *it)
         ship_pos[s] = (MyePosition2D){ SCREEN_W * 0.5f, SCREEN_H * 0.5f };
         ship_vel[s] = (Velocity){ 0.0f, 0.0f };
         ship[s].invulnerable = SHIP_INVULN_TIME;
+        /* Respawning in the middle is a teleport like any other. */
+        mye_transform_snap(world, it->entities[s]);
     }
 
 }

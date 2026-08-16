@@ -177,8 +177,12 @@ ecs_world_t *mye_init(const mye_config *config)
 
     /* On by default in debug builds only: an HTTP server has no business in
      * a shipped game. */
+    /* Windowed debug builds only. Not release -- a shipped game has no
+     * business running an HTTP server -- and not headless, because the test
+     * suite creates hundreds of worlds that would each bind the same port
+     * and log the same line. Tests opt in via mye_config.explorer. */
 #if defined(MYE_DEBUG)
-    bool explorer = true;
+    bool explorer = !cfg.headless;
 #else
     bool explorer = false;
 #endif

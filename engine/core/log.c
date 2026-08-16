@@ -7,11 +7,20 @@
 #include <string.h>
 
 /* Logging configuration is process-wide by nature -- raylib's and flecs'
- * hooks are global function pointers, so there is nowhere else to put it. */
-static mye_log_level g_level = MYE_LOG_INFO;
+ * hooks are global function pointers, so there is nowhere else to put it.
+ *
+ * The counters are atomic because logging genuinely happens on several
+ * threads: raylib's TraceLog fires from the asset worker pool during
+ * LoadImage. TSan found this the day the log module was written. */
+static _Atomic int g_level = MYE_LOG_INFO;
 static mye_log_sink_fn g_sink = NULL;
 static void *g_sink_user = NULL;
-static mye_log_counts g_counts;
+
+static _Atomic unsigned g_count_trace;
+static _Atomic unsigned g_count_debug;
+static _Atomic unsigned g_count_info;
+static _Atomic unsigned g_count_warn;
+static _Atomic unsigned g_count_error;
 
 static const char *level_name(mye_log_level level)
 {
@@ -28,13 +37,17 @@ static const char *level_name(mye_log_level level)
 
 static void count_line(mye_log_level level)
 {
+    _Atomic unsigned *counter = NULL;
     switch (level) {
-    case MYE_LOG_TRACE: ++g_counts.trace; break;
-    case MYE_LOG_DEBUG: ++g_counts.debug; break;
-    case MYE_LOG_INFO:  ++g_counts.info; break;
-    case MYE_LOG_WARN:  ++g_counts.warn; break;
-    case MYE_LOG_ERROR: ++g_counts.error; break;
+    case MYE_LOG_TRACE: counter = &g_count_trace; break;
+    case MYE_LOG_DEBUG: counter = &g_count_debug; break;
+    case MYE_LOG_INFO:  counter = &g_count_info; break;
+    case MYE_LOG_WARN:  counter = &g_count_warn; break;
+    case MYE_LOG_ERROR: counter = &g_count_error; break;
     case MYE_LOG_OFF:   break;
+    }
+    if (counter != NULL) {
+        atomic_fetch_add_explicit(counter, 1u, memory_order_relaxed);
     }
 }
 
@@ -45,8 +58,15 @@ static void default_sink(mye_log_level level, const char *source,
     fprintf(stderr, "[%-5s %s] %s\n", level_name(level), source, message);
 }
 
-void mye_log_set_level(mye_log_level level) { g_level = level; }
-mye_log_level mye_log_get_level(void) { return g_level; }
+void mye_log_set_level(mye_log_level level)
+{
+    atomic_store_explicit(&g_level, (int)level, memory_order_relaxed);
+}
+
+mye_log_level mye_log_get_level(void)
+{
+    return (mye_log_level)atomic_load_explicit(&g_level, memory_order_relaxed);
+}
 
 void mye_log_set_sink(mye_log_sink_fn sink, void *user)
 {
@@ -54,11 +74,24 @@ void mye_log_set_sink(mye_log_sink_fn sink, void *user)
     g_sink_user = user;
 }
 
-mye_log_counts mye_log_get_counts(void) { return g_counts; }
+mye_log_counts mye_log_get_counts(void)
+{
+    return (mye_log_counts){
+        .trace = atomic_load_explicit(&g_count_trace, memory_order_relaxed),
+        .debug = atomic_load_explicit(&g_count_debug, memory_order_relaxed),
+        .info = atomic_load_explicit(&g_count_info, memory_order_relaxed),
+        .warn = atomic_load_explicit(&g_count_warn, memory_order_relaxed),
+        .error = atomic_load_explicit(&g_count_error, memory_order_relaxed),
+    };
+}
 
 void mye_log_reset_counts(void)
 {
-    g_counts = (mye_log_counts){ 0 };
+    atomic_store_explicit(&g_count_trace, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_count_debug, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_count_info, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_count_warn, 0u, memory_order_relaxed);
+    atomic_store_explicit(&g_count_error, 0u, memory_order_relaxed);
 }
 
 void mye_log_writev(mye_log_level level, const char *source, const char *fmt,
@@ -68,7 +101,8 @@ void mye_log_writev(mye_log_level level, const char *source, const char *fmt,
      * depend on the verbosity setting. */
     count_line(level);
 
-    if (level < g_level || g_level == MYE_LOG_OFF) {
+    mye_log_level threshold = mye_log_get_level();
+    if (level < threshold || threshold == MYE_LOG_OFF) {
         return;
     }
 

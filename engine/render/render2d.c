@@ -7,6 +7,7 @@ ECS_COMPONENT_DECLARE(MyeRotation2D);
 ECS_COMPONENT_DECLARE(MyeScale2D);
 ECS_COMPONENT_DECLARE(MyeSprite);
 ECS_COMPONENT_DECLARE(MyeSpriteAnim);
+ECS_COMPONENT_DECLARE(MyeInterpolate);
 ECS_COMPONENT_DECLARE(MyeHidden);
 ECS_COMPONENT_DECLARE(MyeCamera2D);
 ECS_COMPONENT_DECLARE(MyeRenderConfig);
@@ -106,6 +107,10 @@ static void MyeRenderSprites(ecs_iter_t *it)
      * there is nothing to free and no per-frame malloc. */
     mye_allocator frame = mye_frame_allocator(world);
 
+    /* How far this frame sits between the last two fixed steps. */
+    const MyeTime *time = ecs_singleton_get(world, MyeTime);
+    float alpha = time != NULL ? time->alpha : 0.0f;
+
     int32_t total = 0;
     ecs_iter_t count_it = ecs_query_iter(world, state->sprites);
     while (ecs_query_next(&count_it)) {
@@ -129,6 +134,7 @@ static void MyeRenderSprites(ecs_iter_t *it)
         const MyePosition2D *positions = ecs_field(&iter, MyePosition2D, 1);
         const MyeRotation2D *rotations = ecs_field(&iter, MyeRotation2D, 2);
         const MyeScale2D *scales = ecs_field(&iter, MyeScale2D, 3);
+        const MyeInterpolate *interp = ecs_field(&iter, MyeInterpolate, 4);
 
         for (int i = 0; i < iter.count && count < total; ++i) {
             const Texture2D *texture =
@@ -147,10 +153,23 @@ static void MyeRenderSprites(ecs_iter_t *it)
             float sy = scales != NULL ? scales[i].y : 1.0f;
             float angle = rotations != NULL ? rotations[i].angle : 0.0f;
 
+            /* Blend between the last two simulated positions if this entity
+             * opted in. The result stays local to the draw list: it is never
+             * written back, so nothing else can mistake it for the
+             * simulation's position. */
+            float draw_x = positions[i].x;
+            float draw_y = positions[i].y;
+            if (interp != NULL && !interp[i].snap) {
+                draw_x = interp[i].prev_x +
+                         (positions[i].x - interp[i].prev_x) * alpha;
+                draw_y = interp[i].prev_y +
+                         (positions[i].y - interp[i].prev_y) * alpha;
+            }
+
             items[count++] = (draw_item){
                 .texture = texture,
                 .source = source,
-                .dest = { positions[i].x, positions[i].y, source.width * sx,
+                .dest = { draw_x, draw_y, source.width * sx,
                           source.height * sy },
                 .origin = { sprites[i].origin.x * sx, sprites[i].origin.y * sy },
                 .rotation_degrees = angle * RAD2DEG,
@@ -175,6 +194,49 @@ static void MyeRenderEnd(ecs_iter_t *it)
 {
     (void)it;
     EndDrawing();
+}
+
+/* ------------------------------------------------------- interpolation -- */
+
+/* Records where each interpolated entity was before this fixed step, so the
+ * renderer has two endpoints to blend between. Runs in MyeOnFixedUpdate, at
+ * the top of every step, so `prev` is always the state one step back -- not
+ * one frame back, which would be wrong whenever a frame runs several steps.
+ *
+ * A pending snap makes prev = current, so the blend for that frame is a
+ * no-op and a teleport draws no streak. */
+static void MyeCapturePrevPositions(ecs_iter_t *it)
+{
+    MyeInterpolate *interp = ecs_field(it, MyeInterpolate, 0);
+    const MyePosition2D *pos = ecs_field(it, MyePosition2D, 1);
+
+    for (int i = 0; i < it->count; ++i) {
+        interp[i].prev_x = pos[i].x;
+        interp[i].prev_y = pos[i].y;
+        interp[i].snap = false;
+    }
+}
+
+void mye_transform_snap(ecs_world_t *world, ecs_entity_t entity)
+{
+    /* Called from gameplay code on whatever it just teleported, which may be
+     * an entity already deleted this frame. Refuse quietly rather than
+     * tripping flecs' assert. */
+    if (world == NULL || entity == 0 || !ecs_is_alive(world, entity)) {
+        return;
+    }
+
+    MyeInterpolate *interp = ecs_get_mut(world, entity, MyeInterpolate);
+    if (interp == NULL) {
+        return; /* not interpolated: nothing to suppress */
+    }
+    const MyePosition2D *pos = ecs_get(world, entity, MyePosition2D);
+    if (pos != NULL) {
+        interp->prev_x = pos->x;
+        interp->prev_y = pos->y;
+    }
+    interp->snap = true;
+    ecs_modified(world, entity, MyeInterpolate);
 }
 
 /* ----------------------------------------------------------- animation -- */
@@ -306,6 +368,7 @@ void MyeRender2dModuleImport(ecs_world_t *world)
     ECS_COMPONENT_DEFINE(world, MyeScale2D);
     ECS_COMPONENT_DEFINE(world, MyeSprite);
     ECS_COMPONENT_DEFINE(world, MyeSpriteAnim);
+    ECS_COMPONENT_DEFINE(world, MyeInterpolate);
     ECS_COMPONENT_DEFINE(world, MyeHidden);
     ECS_COMPONENT_DEFINE(world, MyeCamera2D);
     ECS_COMPONENT_DEFINE(world, MyeRenderConfig);
@@ -325,6 +388,8 @@ void MyeRender2dModuleImport(ecs_world_t *world)
             { .id = ecs_id(MyePosition2D), .inout = EcsIn },
             { .id = ecs_id(MyeRotation2D), .inout = EcsIn, .oper = EcsOptional },
             { .id = ecs_id(MyeScale2D), .inout = EcsIn, .oper = EcsOptional },
+            { .id = ecs_id(MyeInterpolate), .inout = EcsIn,
+              .oper = EcsOptional },
             { .id = ecs_id(MyeHidden), .oper = EcsNot },
         },
     });
@@ -335,6 +400,19 @@ void MyeRender2dModuleImport(ecs_world_t *world)
     /* Headless worlds get the components, queries and phases -- so gameplay
      * logic is fully testable -- but no draw systems, because raylib's
      * drawing calls require a window and an OpenGL context. */
+    /* Captures previous positions at the top of every fixed step. Registered
+     * headless too: the state it maintains is simulation, not drawing. */
+    ecs_system(world, {
+        .entity = ecs_entity(world, { .name = "MyeCapturePrevPositions",
+                                      .add = ecs_ids(ecs_dependson(
+                                          MyeOnFixedUpdate)) }),
+        .query.terms = {
+            { .id = ecs_id(MyeInterpolate) },
+            { .id = ecs_id(MyePosition2D), .inout = EcsIn },
+        },
+        .callback = MyeCapturePrevPositions,
+    });
+
     /* Animation is simulation, not drawing: it runs headless too, so tests
      * can assert on frame progression without a window. */
     ECS_SYSTEM(world, MyeSpriteAnimUpdate, EcsPreStore, MyeSpriteAnim,
