@@ -46,6 +46,7 @@ configuration has caught bugs the others missed.
 | `example_02_asteroids` | a complete game: input, collision, audio, animation, prefabs |
 | `example_03_scene3d` | 3D transform hierarchy, lighting, 2D HUD over a 3D scene |
 | `example_04_stress` | benchmark for entity counts and worker threads |
+| `example_06_tutorial` | every feature in one game -- the [tutorial's](TUTORIAL.md) capstone |
 
 Every example honours two environment variables, which is how they are
 verified automatically:
@@ -151,6 +152,11 @@ entities per system; below that the synchronisation costs more than it saves
 (at 100 entities, 8 threads is 4x *slower*).
 
 ## Documentation
+
+**[TUTORIAL.md](TUTORIAL.md) is the place to start.** It covers every feature
+the engine has -- what each one is, why it exists, and a working program using
+it -- ending with one game that uses all of them
+([examples/06_tutorial](examples/06_tutorial)).
 
 Design documents live in [plan/](plan/) — architecture, ECS usage, rendering,
 memory, concurrency, assets, roadmap, build, testing, and a planned
