@@ -1,0 +1,982 @@
+#include "asset/asset.h"
+
+#include "core/channel.h"
+#include "core/jobs.h"
+
+#include <stdatomic.h>
+#include <string.h>
+
+ECS_COMPONENT_DECLARE(MyeAssets);
+
+#define MYE_MAX_TEXTURES 256
+#define MYE_MAX_SOUNDS 128
+#define MYE_MAX_MODELS 128
+#define MYE_ASSET_KEY_MAX 128
+/* Deep enough that every texture slot can be in flight at once. */
+#define MYE_UPLOAD_QUEUE_CAPACITY 256
+
+typedef enum asset_state {
+    ASSET_EMPTY = 0,
+    ASSET_LOADING, /* a worker is reading/decoding it */
+    ASSET_LOADED,
+    ASSET_FAILED,
+} asset_state;
+
+/* Sent from a worker thread to the main thread once decoding finishes. The
+ * Image owns heap memory; whoever receives it must upload or unload it. */
+typedef struct upload_msg {
+    uint32_t index;
+    uint32_t generation;
+    Image image;
+    bool decoded_ok;
+} upload_msg;
+
+/* One per in-flight load. Owned by the job, freed after it sends. */
+typedef struct load_request {
+    struct mye_asset_db *db;
+    uint32_t index;
+    uint32_t generation;
+    char path[MYE_ASSET_KEY_MAX];
+} load_request;
+
+typedef struct texture_slot {
+    uint32_t generation;
+    asset_state state;
+    uint32_t refcount;
+    uint32_t scope; /* which scene loaded it; 0 = unscoped */
+    char key[MYE_ASSET_KEY_MAX];
+    Texture2D texture;
+} texture_slot;
+
+typedef struct model_slot {
+    uint32_t generation;
+    asset_state state;
+    uint32_t refcount;
+    uint32_t scope; /* which scene loaded it; 0 = unscoped */
+    char key[MYE_ASSET_KEY_MAX];
+    Model model;
+} model_slot;
+
+typedef struct sound_slot {
+    uint32_t generation;
+    asset_state state;
+    uint32_t refcount;
+    uint32_t scope; /* which scene loaded it; 0 = unscoped */
+    char key[MYE_ASSET_KEY_MAX];
+    Sound sound;
+} sound_slot;
+
+struct mye_asset_db {
+    mye_allocator allocator;
+
+    texture_slot *textures;
+    sound_slot *sounds;
+    model_slot *models;
+
+    Texture2D placeholder;
+    bool placeholder_ready;
+    bool audio_ready;
+    /* No window/GL: textures are recorded with their dimensions but never
+     * uploaded, so registry behaviour stays testable headlessly. */
+    bool headless;
+
+    uint32_t textures_loaded_total;
+    uint32_t scope; /* scope new assets are attributed to */
+
+    /* Async pipeline. Absent in headless worlds and when the pool fails to
+     * start, in which case loads fall back to synchronous. */
+    mye_jobs *jobs;
+    mye_channel *uploads;
+    atomic_size_t in_flight;
+};
+
+/* Generation 0 is never handed out, so a zeroed handle is always invalid. */
+#define GENERATION_START 1
+
+/* ---------------------------------------------------------------- lookup -- */
+
+static mye_asset_db *db_get(const ecs_world_t *world)
+{
+    const MyeAssets *assets = ecs_singleton_get(world, MyeAssets);
+    return assets != NULL ? assets->db : NULL;
+}
+
+static void copy_key(char *dst, const char *src)
+{
+    size_t n = strlen(src);
+    if (n >= MYE_ASSET_KEY_MAX) {
+        /* Keep the tail: the filename is more distinctive than the prefix. */
+        src += n - (MYE_ASSET_KEY_MAX - 1);
+        n = MYE_ASSET_KEY_MAX - 1;
+    }
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+/* Matches slots that are loaded *or* still decoding. Including LOADING is
+ * what makes dedupe work for async: a second request for a path already in
+ * flight must share that slot, not start a second decode and upload. */
+static int find_texture_by_key(const mye_asset_db *db, const char *key)
+{
+    for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
+        if ((db->textures[i].state == ASSET_LOADED ||
+             db->textures[i].state == ASSET_LOADING) &&
+            strcmp(db->textures[i].key, key) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int find_free_texture_slot(const mye_asset_db *db)
+{
+    for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
+        if (db->textures[i].state == ASSET_EMPTY) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static texture_slot *resolve_texture(const mye_asset_db *db,
+                                     mye_texture handle)
+{
+    if (db == NULL || handle.generation == 0 ||
+        handle.index >= MYE_MAX_TEXTURES) {
+        return NULL;
+    }
+    texture_slot *slot = &db->textures[handle.index];
+    if (slot->state != ASSET_LOADED || slot->generation != handle.generation) {
+        return NULL; /* stale handle: the slot was reused or freed */
+    }
+    return slot;
+}
+
+/* -------------------------------------------------------------- textures -- */
+
+static mye_texture claim_texture_slot(mye_asset_db *db, const char *key,
+                                      Texture2D texture)
+{
+    int index = find_free_texture_slot(db);
+    if (index < 0) {
+        if (texture.id != 0) {
+            UnloadTexture(texture); /* registry full: do not leak the upload */
+        }
+        return (mye_texture){ 0 };
+    }
+
+    texture_slot *slot = &db->textures[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_LOADED;
+    slot->refcount = 1;
+    slot->scope = db->scope;
+    slot->texture = texture;
+    copy_key(slot->key, key);
+    ++db->textures_loaded_total;
+
+    return (mye_texture){ .index = (uint32_t)index,
+                          .generation = slot->generation };
+}
+
+mye_texture mye_texture_load(ecs_world_t *world, const char *path)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || path == NULL) {
+        return (mye_texture){ 0 };
+    }
+
+    char key[MYE_ASSET_KEY_MAX];
+    copy_key(key, path);
+
+    int existing = find_texture_by_key(db, key);
+    if (existing >= 0) {
+        ++db->textures[existing].refcount; /* dedupe: share the same upload */
+        return (mye_texture){ .index = (uint32_t)existing,
+                              .generation = db->textures[existing].generation };
+    }
+
+    if (db->headless) {
+        /* Decode on the CPU only -- enough to know the dimensions. */
+        Image image = LoadImage(path);
+        if (image.data == NULL) {
+            return (mye_texture){ 0 };
+        }
+        Texture2D fake = { .id = 0, .width = image.width,
+                           .height = image.height, .mipmaps = 1 };
+        UnloadImage(image);
+        return claim_texture_slot(db, key, fake);
+    }
+
+    Texture2D texture = LoadTexture(path);
+    if (texture.id == 0) {
+        return (mye_texture){ 0 };
+    }
+    return claim_texture_slot(db, key, texture);
+}
+
+mye_texture mye_texture_from_image(ecs_world_t *world, const char *name,
+                                   Image image)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || name == NULL) {
+        UnloadImage(image);
+        return (mye_texture){ 0 };
+    }
+
+    char key[MYE_ASSET_KEY_MAX];
+    copy_key(key, name);
+
+    int existing = find_texture_by_key(db, key);
+    if (existing >= 0) {
+        UnloadImage(image); /* caller handed over ownership */
+        ++db->textures[existing].refcount;
+        return (mye_texture){ .index = (uint32_t)existing,
+                              .generation = db->textures[existing].generation };
+    }
+
+    if (db->headless) {
+        Texture2D fake = { .id = 0, .width = image.width,
+                           .height = image.height, .mipmaps = 1 };
+        UnloadImage(image);
+        return claim_texture_slot(db, key, fake);
+    }
+
+    Texture2D texture = LoadTextureFromImage(image);
+    UnloadImage(image); /* now lives on the GPU */
+    if (texture.id == 0) {
+        return (mye_texture){ 0 };
+    }
+    return claim_texture_slot(db, key, texture);
+}
+
+const Texture2D *mye_texture_get(const ecs_world_t *world, mye_texture handle)
+{
+    const texture_slot *slot = resolve_texture(db_get(world), handle);
+    return slot != NULL ? &slot->texture : NULL;
+}
+
+const Texture2D *mye_texture_get_or_placeholder(const ecs_world_t *world,
+                                                mye_texture handle)
+{
+    mye_asset_db *db = db_get(world);
+    const texture_slot *slot = resolve_texture(db, handle);
+    if (slot != NULL) {
+        return &slot->texture;
+    }
+    return (db != NULL && db->placeholder_ready) ? &db->placeholder : NULL;
+}
+
+bool mye_texture_valid(const ecs_world_t *world, mye_texture handle)
+{
+    return resolve_texture(db_get(world), handle) != NULL;
+}
+
+void mye_texture_release(ecs_world_t *world, mye_texture handle)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || handle.generation == 0 ||
+        handle.index >= MYE_MAX_TEXTURES) {
+        return;
+    }
+
+    /* Deliberately not resolve_texture(): a handle whose decode is still in
+     * flight must be releasable too. Abandoning it bumps the generation, so
+     * the worker's result is discarded when it arrives. */
+    texture_slot *slot = &db->textures[handle.index];
+    if (slot->generation != handle.generation ||
+        (slot->state != ASSET_LOADED && slot->state != ASSET_LOADING)) {
+        return;
+    }
+
+    if (--slot->refcount > 0) {
+        return; /* someone else still holds it */
+    }
+
+    if (slot->texture.id != 0) {
+        UnloadTexture(slot->texture);
+    }
+    slot->state = ASSET_EMPTY;
+    slot->key[0] = '\0';
+    slot->texture = (Texture2D){ 0 };
+    /* Bumping the generation is what makes every outstanding handle to this
+     * slot resolve to NULL from now on. */
+    ++slot->generation;
+}
+
+/* ---------------------------------------------------------------- models -- */
+
+static model_slot *resolve_model(const mye_asset_db *db, mye_model handle)
+{
+    if (db == NULL || handle.generation == 0 ||
+        handle.index >= MYE_MAX_MODELS) {
+        return NULL;
+    }
+    model_slot *slot = &db->models[handle.index];
+    if (slot->state != ASSET_LOADED || slot->generation != handle.generation) {
+        return NULL;
+    }
+    return slot;
+}
+
+static mye_model claim_model_slot(mye_asset_db *db, const char *key,
+                                  Model model)
+{
+    int index = -1;
+    for (int i = 0; i < MYE_MAX_MODELS; ++i) {
+        if (db->models[i].state == ASSET_EMPTY) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0) {
+        if (!db->headless) {
+            UnloadModel(model);
+        }
+        return (mye_model){ 0 };
+    }
+
+    model_slot *slot = &db->models[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_LOADED;
+    slot->refcount = 1;
+    slot->scope = db->scope;
+    slot->model = model;
+    copy_key(slot->key, key);
+
+    return (mye_model){ .index = (uint32_t)index,
+                        .generation = slot->generation };
+}
+
+static int find_model_by_key(const mye_asset_db *db, const char *key)
+{
+    for (int i = 0; i < MYE_MAX_MODELS; ++i) {
+        if (db->models[i].state == ASSET_LOADED &&
+            strcmp(db->models[i].key, key) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+mye_model mye_model_load(ecs_world_t *world, const char *path)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || path == NULL) {
+        return (mye_model){ 0 };
+    }
+
+    char key[MYE_ASSET_KEY_MAX];
+    copy_key(key, path);
+
+    int existing = find_model_by_key(db, key);
+    if (existing >= 0) {
+        ++db->models[existing].refcount;
+        return (mye_model){ .index = (uint32_t)existing,
+                            .generation = db->models[existing].generation };
+    }
+
+    if (db->headless) {
+        /* Loading a model uploads vertex buffers to the GPU, so headless
+         * worlds cannot hold a real one. The registry still tracks the slot
+         * so scene and refcount logic stays testable. */
+        return claim_model_slot(db, key, (Model){ 0 });
+    }
+
+    Model model = LoadModel(path);
+    if (model.meshCount == 0) {
+        return (mye_model){ 0 };
+    }
+    return claim_model_slot(db, key, model);
+}
+
+mye_model mye_model_from_mesh(ecs_world_t *world, const char *name, Mesh mesh,
+                              Color tint)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || name == NULL) {
+        return (mye_model){ 0 };
+    }
+
+    char key[MYE_ASSET_KEY_MAX];
+    copy_key(key, name);
+
+    int existing = find_model_by_key(db, key);
+    if (existing >= 0) {
+        if (!db->headless) {
+            UnloadMesh(mesh);
+        }
+        ++db->models[existing].refcount;
+        return (mye_model){ .index = (uint32_t)existing,
+                            .generation = db->models[existing].generation };
+    }
+
+    if (db->headless) {
+        return claim_model_slot(db, key, (Model){ 0 });
+    }
+
+    Model model = LoadModelFromMesh(mesh); /* takes ownership of the mesh */
+    if (model.meshCount == 0) {
+        return (mye_model){ 0 };
+    }
+    model.materials[0].maps[MATERIAL_MAP_DIFFUSE].color = tint;
+    return claim_model_slot(db, key, model);
+}
+
+const Model *mye_model_get(const ecs_world_t *world, mye_model handle)
+{
+    const model_slot *slot = resolve_model(db_get(world), handle);
+    return slot != NULL ? &slot->model : NULL;
+}
+
+bool mye_model_valid(const ecs_world_t *world, mye_model handle)
+{
+    return resolve_model(db_get(world), handle) != NULL;
+}
+
+void mye_model_release(ecs_world_t *world, mye_model handle)
+{
+    mye_asset_db *db = db_get(world);
+    model_slot *slot = resolve_model(db, handle);
+    if (slot == NULL || --slot->refcount > 0) {
+        return;
+    }
+    if (!db->headless && slot->model.meshCount > 0) {
+        UnloadModel(slot->model);
+    }
+    slot->state = ASSET_EMPTY;
+    slot->key[0] = '\0';
+    slot->model = (Model){ 0 };
+    ++slot->generation;
+}
+
+/* ---------------------------------------------------------------- sounds -- */
+
+static sound_slot *resolve_sound(const mye_asset_db *db, mye_sound handle)
+{
+    if (db == NULL || handle.generation == 0 ||
+        handle.index >= MYE_MAX_SOUNDS) {
+        return NULL;
+    }
+    sound_slot *slot = &db->sounds[handle.index];
+    if (slot->state != ASSET_LOADED || slot->generation != handle.generation) {
+        return NULL;
+    }
+    return slot;
+}
+
+mye_sound mye_sound_load(ecs_world_t *world, const char *path)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || path == NULL || !db->audio_ready) {
+        return (mye_sound){ 0 };
+    }
+
+    char key[MYE_ASSET_KEY_MAX];
+    copy_key(key, path);
+
+    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
+        if (db->sounds[i].state == ASSET_LOADED &&
+            strcmp(db->sounds[i].key, key) == 0) {
+            ++db->sounds[i].refcount;
+            return (mye_sound){ .index = (uint32_t)i,
+                                .generation = db->sounds[i].generation };
+        }
+    }
+
+    int index = -1;
+    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
+        if (db->sounds[i].state == ASSET_EMPTY) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0) {
+        return (mye_sound){ 0 };
+    }
+
+    Sound sound = LoadSound(path);
+    if (sound.frameCount == 0) {
+        return (mye_sound){ 0 };
+    }
+
+    sound_slot *slot = &db->sounds[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_LOADED;
+    slot->refcount = 1;
+    slot->scope = db->scope;
+    slot->sound = sound;
+    copy_key(slot->key, key);
+
+    return (mye_sound){ .index = (uint32_t)index,
+                        .generation = slot->generation };
+}
+
+mye_sound mye_sound_from_wave(ecs_world_t *world, const char *name, Wave wave)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || name == NULL) {
+        UnloadWave(wave);
+        return (mye_sound){ 0 };
+    }
+
+    char key[MYE_ASSET_KEY_MAX];
+    copy_key(key, name);
+
+    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
+        if (db->sounds[i].state == ASSET_LOADED &&
+            strcmp(db->sounds[i].key, key) == 0) {
+            UnloadWave(wave); /* caller handed over ownership */
+            ++db->sounds[i].refcount;
+            return (mye_sound){ .index = (uint32_t)i,
+                                .generation = db->sounds[i].generation };
+        }
+    }
+
+    int index = -1;
+    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
+        if (db->sounds[i].state == ASSET_EMPTY) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0 || !db->audio_ready) {
+        /* Headless or no device: the wave has nowhere to go. Callers get an
+         * invalid handle and the game runs silently rather than failing. */
+        UnloadWave(wave);
+        return (mye_sound){ 0 };
+    }
+
+    Sound sound = LoadSoundFromWave(wave);
+    UnloadWave(wave);
+    if (sound.frameCount == 0) {
+        return (mye_sound){ 0 };
+    }
+
+    sound_slot *slot = &db->sounds[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_LOADED;
+    slot->refcount = 1;
+    slot->scope = db->scope;
+    slot->sound = sound;
+    copy_key(slot->key, key);
+
+    return (mye_sound){ .index = (uint32_t)index,
+                        .generation = slot->generation };
+}
+
+const Sound *mye_sound_get(const ecs_world_t *world, mye_sound handle)
+{
+    const sound_slot *slot = resolve_sound(db_get(world), handle);
+    return slot != NULL ? &slot->sound : NULL;
+}
+
+bool mye_sound_valid(const ecs_world_t *world, mye_sound handle)
+{
+    return resolve_sound(db_get(world), handle) != NULL;
+}
+
+void mye_sound_release(ecs_world_t *world, mye_sound handle)
+{
+    sound_slot *slot = resolve_sound(db_get(world), handle);
+    if (slot == NULL || --slot->refcount > 0) {
+        return;
+    }
+    UnloadSound(slot->sound);
+    slot->state = ASSET_EMPTY;
+    slot->key[0] = '\0';
+    ++slot->generation;
+}
+
+
+/* ----------------------------------------------------------------- async -- */
+
+/* Runs on a worker thread. Touches only its own request, the file system, and
+ * the channel -- never the ECS world, never OpenGL. */
+static void decode_texture_job(void *arg)
+{
+    load_request *request = (load_request *)arg;
+    mye_asset_db *db = request->db;
+
+    /* LoadImage is CPU-only (stb_image); safe off the main thread. */
+    Image image = LoadImage(request->path);
+
+    upload_msg msg = {
+        .index = request->index,
+        .generation = request->generation,
+        .image = image,
+        .decoded_ok = image.data != NULL,
+    };
+
+    /* The queue is sized to the registry, so a full queue means something is
+     * badly wrong; drop the pixels rather than leak them. */
+    if (!mye_channel_send(db->uploads, &msg)) {
+        if (msg.decoded_ok) {
+            UnloadImage(image);
+        }
+        atomic_fetch_sub(&db->in_flight, 1);
+    }
+
+    mye_free(db->allocator, request, sizeof *request);
+}
+
+mye_texture mye_texture_load_async(ecs_world_t *world, const char *path)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || path == NULL) {
+        return (mye_texture){ 0 };
+    }
+
+    /* No worker pool (headless, or it failed to start): just load inline. */
+    if (db->jobs == NULL || db->uploads == NULL) {
+        return mye_texture_load(world, path);
+    }
+
+    char key[MYE_ASSET_KEY_MAX];
+    copy_key(key, path);
+
+    /* Already loaded or already being loaded: share it. */
+    int existing = find_texture_by_key(db, key);
+    if (existing >= 0) {
+        ++db->textures[existing].refcount;
+        return (mye_texture){ .index = (uint32_t)existing,
+                              .generation = db->textures[existing].generation };
+    }
+
+    int index = find_free_texture_slot(db);
+    if (index < 0) {
+        return (mye_texture){ 0 };
+    }
+
+    /* Claim the slot now so the handle is usable immediately and a second
+     * request for the same path dedupes against it. */
+    texture_slot *slot = &db->textures[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_LOADING;
+    slot->refcount = 1;
+    slot->scope = db->scope;
+    slot->texture = (Texture2D){ 0 };
+    copy_key(slot->key, key);
+
+    load_request *request = MYE_NEW(db->allocator, load_request);
+    if (request == NULL) {
+        slot->state = ASSET_EMPTY;
+        slot->key[0] = '\0';
+        return (mye_texture){ 0 };
+    }
+    request->db = db;
+    request->index = (uint32_t)index;
+    request->generation = slot->generation;
+    copy_key(request->path, path);
+
+    atomic_fetch_add(&db->in_flight, 1);
+    if (!mye_jobs_submit(db->jobs, decode_texture_job, request)) {
+        /* Queue full: fall back to loading it here rather than dropping it. */
+        atomic_fetch_sub(&db->in_flight, 1);
+        mye_free(db->allocator, request, sizeof *request);
+        slot->state = ASSET_EMPTY;
+        slot->key[0] = '\0';
+        return mye_texture_load(world, path);
+    }
+
+    return (mye_texture){ .index = (uint32_t)index,
+                          .generation = slot->generation };
+}
+
+/* Main thread: drains decoded images and uploads them to the GPU. Runs in
+ * EcsPreStore, before anything draws this frame. */
+static void MyeAssetUpload(ecs_iter_t *it)
+{
+    ecs_world_t *world = it->world;
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || db->uploads == NULL) {
+        return;
+    }
+
+    upload_msg msg;
+    while (mye_channel_recv(db->uploads, &msg)) {
+        atomic_fetch_sub(&db->in_flight, 1);
+
+        texture_slot *slot = &db->textures[msg.index];
+        /* The handle may have been released while the worker was decoding;
+         * the generation check is what makes that safe. */
+        bool slot_still_ours = slot->generation == msg.generation &&
+                               slot->state == ASSET_LOADING;
+
+        if (!slot_still_ours) {
+            if (msg.decoded_ok) {
+                UnloadImage(msg.image);
+            }
+            continue;
+        }
+
+        if (!msg.decoded_ok) {
+            slot->state = ASSET_FAILED;
+            continue;
+        }
+
+        if (db->headless) {
+            slot->texture = (Texture2D){ .id = 0, .width = msg.image.width,
+                                         .height = msg.image.height,
+                                         .mipmaps = 1 };
+        } else {
+            slot->texture = LoadTextureFromImage(msg.image);
+        }
+        UnloadImage(msg.image);
+
+        slot->state = ASSET_LOADED;
+        ++db->textures_loaded_total;
+    }
+}
+
+mye_asset_status mye_texture_status(const ecs_world_t *world,
+                                    mye_texture handle)
+{
+    const mye_asset_db *db = db_get(world);
+    if (db == NULL || handle.generation == 0 ||
+        handle.index >= MYE_MAX_TEXTURES) {
+        return MYE_ASSET_MISSING;
+    }
+
+    const texture_slot *slot = &db->textures[handle.index];
+    if (slot->generation != handle.generation) {
+        return MYE_ASSET_MISSING; /* stale */
+    }
+
+    switch (slot->state) {
+    case ASSET_LOADING: return MYE_ASSET_LOADING;
+    case ASSET_LOADED:  return MYE_ASSET_READY;
+    case ASSET_FAILED:  return MYE_ASSET_FAILED;
+    case ASSET_EMPTY:   break;
+    }
+    return MYE_ASSET_MISSING;
+}
+
+size_t mye_assets_pending(const ecs_world_t *world)
+{
+    mye_asset_db *db = db_get(world);
+    return db != NULL ? atomic_load(&db->in_flight) : 0;
+}
+
+bool mye_assets_ready(const ecs_world_t *world)
+{
+    return mye_assets_pending(world) == 0;
+}
+
+/* ---------------------------------------------------------------- scopes -- */
+
+void mye_assets_set_scope(ecs_world_t *world, uint32_t scope)
+{
+    mye_asset_db *db = db_get(world);
+    if (db != NULL) {
+        db->scope = scope;
+    }
+}
+
+uint32_t mye_assets_current_scope(const ecs_world_t *world)
+{
+    const mye_asset_db *db = db_get(world);
+    return db != NULL ? db->scope : 0;
+}
+
+void mye_assets_release_scope(ecs_world_t *world, uint32_t scope)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || scope == 0) {
+        return; /* scope 0 is "unscoped": never bulk-released */
+    }
+
+    /* Release rather than unload outright: an asset another scope also asked
+     * for has a refcount above one and must survive. */
+    for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
+        if (db->textures[i].state != ASSET_EMPTY &&
+            db->textures[i].scope == scope) {
+            mye_texture_release(world,
+                                (mye_texture){ .index = (uint32_t)i,
+                                               .generation =
+                                                   db->textures[i].generation });
+        }
+    }
+    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
+        if (db->sounds[i].state == ASSET_LOADED &&
+            db->sounds[i].scope == scope) {
+            mye_sound_release(world,
+                              (mye_sound){ .index = (uint32_t)i,
+                                           .generation =
+                                               db->sounds[i].generation });
+        }
+    }
+    for (int i = 0; i < MYE_MAX_MODELS; ++i) {
+        if (db->models[i].state == ASSET_LOADED &&
+            db->models[i].scope == scope) {
+            mye_model_release(world,
+                              (mye_model){ .index = (uint32_t)i,
+                                           .generation =
+                                               db->models[i].generation });
+        }
+    }
+}
+
+/* ----------------------------------------------------------------- stats -- */
+
+
+mye_asset_stats mye_asset_stats_get(const ecs_world_t *world)
+{
+    mye_asset_stats stats = { 0 };
+    const mye_asset_db *db = db_get(world);
+    if (db == NULL) {
+        return stats;
+    }
+
+    for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
+        if (db->textures[i].state == ASSET_LOADED) ++stats.textures_live;
+    }
+    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
+        if (db->sounds[i].state == ASSET_LOADED) ++stats.sounds_live;
+    }
+    for (int i = 0; i < MYE_MAX_MODELS; ++i) {
+        if (db->models[i].state == ASSET_LOADED) ++stats.models_live;
+    }
+    stats.textures_loaded_total = db->textures_loaded_total;
+    return stats;
+}
+
+/* ------------------------------------------------------------- lifecycle -- */
+
+/* Runs during ecs_fini, i.e. while the window and audio device are still up,
+ * which is what UnloadTexture and UnloadSound require. */
+static void assets_fini(ecs_world_t *world, void *ctx)
+{
+    (void)world;
+    mye_asset_db *db = (mye_asset_db *)ctx;
+    if (db == NULL) {
+        return;
+    }
+
+    /* Order matters. Stop the workers first: mye_jobs_destroy waits for
+     * every in-flight decode to finish and send, so nothing can arrive after
+     * the channel is drained. Then drain, releasing any pixels that were
+     * decoded but never uploaded. */
+    if (db->jobs != NULL) {
+        mye_jobs_destroy(db->jobs);
+        db->jobs = NULL;
+    }
+    if (db->uploads != NULL) {
+        upload_msg pending;
+        while (mye_channel_recv(db->uploads, &pending)) {
+            if (pending.decoded_ok) {
+                UnloadImage(pending.image);
+            }
+        }
+        mye_channel_destroy(db->uploads);
+        db->uploads = NULL;
+    }
+
+    for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
+        if (db->textures[i].state == ASSET_LOADED &&
+            db->textures[i].texture.id != 0) {
+            UnloadTexture(db->textures[i].texture);
+        }
+    }
+    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
+        if (db->sounds[i].state == ASSET_LOADED) {
+            UnloadSound(db->sounds[i].sound);
+        }
+    }
+    for (int i = 0; i < MYE_MAX_MODELS; ++i) {
+        if (db->models[i].state == ASSET_LOADED && !db->headless &&
+            db->models[i].model.meshCount > 0) {
+            UnloadModel(db->models[i].model);
+        }
+    }
+    if (db->placeholder_ready) {
+        UnloadTexture(db->placeholder);
+    }
+    if (db->audio_ready) {
+        CloseAudioDevice();
+    }
+
+    mye_allocator a = db->allocator;
+    MYE_DELETE_ARRAY(a, db->textures, MYE_MAX_TEXTURES);
+    MYE_DELETE_ARRAY(a, db->sounds, MYE_MAX_SOUNDS);
+    MYE_DELETE_ARRAY(a, db->models, MYE_MAX_MODELS);
+    MYE_DELETE(a, db);
+}
+
+void MyeAssetsModuleImport(ecs_world_t *world)
+{
+    ECS_MODULE(world, MyeAssetsModule);
+
+    ECS_COMPONENT_DEFINE(world, MyeAssets);
+    ecs_add_id(world, ecs_id(MyeAssets), EcsSingleton);
+
+    mye_allocator a = mye_allocator_of(world);
+    mye_asset_db *db = MYE_NEW(a, mye_asset_db);
+    if (db == NULL) {
+        ecs_singleton_set(world, MyeAssets, { .db = NULL });
+        return;
+    }
+
+    db->allocator = a;
+    db->textures = MYE_NEW_ARRAY(a, texture_slot, MYE_MAX_TEXTURES);
+    db->sounds = MYE_NEW_ARRAY(a, sound_slot, MYE_MAX_SOUNDS);
+    db->models = MYE_NEW_ARRAY(a, model_slot, MYE_MAX_MODELS);
+    if (db->textures == NULL || db->sounds == NULL || db->models == NULL) {
+        MYE_DELETE_ARRAY(a, db->textures, MYE_MAX_TEXTURES);
+        MYE_DELETE_ARRAY(a, db->sounds, MYE_MAX_SOUNDS);
+        MYE_DELETE_ARRAY(a, db->models, MYE_MAX_MODELS);
+        MYE_DELETE(a, db);
+        ecs_singleton_set(world, MyeAssets, { .db = NULL });
+        return;
+    }
+
+    const mye_engine *engine = mye_engine_get(world);
+    db->headless = engine == NULL || engine->headless;
+
+    /* Async pipeline. Asset loading is I/O bound, so a couple of workers
+     * saturate it -- this is not the place to spend every core. Headless
+     * worlds get it too, so the pipeline stays testable. */
+    atomic_init(&db->in_flight, 0);
+    int workers = engine != NULL ? engine->asset_workers : 2;
+    if (workers > 0) {
+        db->uploads = mye_channel_create(a, MYE_UPLOAD_QUEUE_CAPACITY,
+                                         sizeof(upload_msg));
+        if (db->uploads != NULL) {
+            db->jobs = mye_jobs_create(a, workers,
+                                       MYE_UPLOAD_QUEUE_CAPACITY);
+            if (db->jobs == NULL) {
+                /* No pool: loads fall back to synchronous. */
+                mye_channel_destroy(db->uploads);
+                db->uploads = NULL;
+            }
+        }
+    }
+
+    if (!db->headless) {
+        /* Visible stand-in for anything that failed to load. */
+        Image placeholder = GenImageColor(8, 8, MAGENTA);
+        db->placeholder = LoadTextureFromImage(placeholder);
+        UnloadImage(placeholder);
+        db->placeholder_ready = db->placeholder.id != 0;
+
+        InitAudioDevice();
+        db->audio_ready = IsAudioDeviceReady();
+    }
+
+    ecs_singleton_set(world, MyeAssets, { .db = db });
+
+    /* Uploads land before anything draws this frame. Registered even when
+     * headless: the state transition to READY must still happen. */
+    ECS_SYSTEM(world, MyeAssetUpload, EcsPreStore, MyeAssets);
+
+    ecs_atfini(world, assets_fini, db);
+}
