@@ -78,7 +78,7 @@ Notes for later:
 - Do not name engine functions `flecs_*` — flecs uses that prefix for internal
   macros and the collision produces baffling errors.
 - Set `MYE_MAX_FRAMES=N` to make any example exit after N frames, so windowed
-  examples can be leak-checked in CI.
+  examples can be leak-checked without a human watching.
 
 ## M3 — First complete 2D game (M) ✅
 

@@ -91,8 +91,8 @@ GPU upload, just with a different backend behind `mye_texture_load_async`.
    (desktop behaviour unchanged, verified by the existing suites).
 3. Build `example_02_asteroids` for the web, single-threaded, no preloaded
    assets. Serve it locally and confirm it plays.
-4. Add a CI-style script that at minimum *compiles* the web target, so desktop
-   work cannot silently break it.
+4. Add a script that at minimum *compiles* the web target, so desktop work
+   cannot silently break it. (No CI -- see [09-testing.md](09-testing.md).)
 5. Document the COOP/COEP requirement if and when threads are enabled.
 
 **Definition of done:** Asteroids runs in a browser at 60 fps with sound, from

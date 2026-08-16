@@ -182,9 +182,10 @@ immediately if it is forgotten.
 
 - **Don't parallelize until it's slow.** Every milestone through M6 runs
   single-threaded; M7 turns flecs workers on as a measured experiment.
-- Debug builds run with ThreadSanitizer in a dedicated CI job once threads
-  exist (TSan and ASan are mutually exclusive — separate build config,
-  see [08-build.md](08-build.md)).
+- ThreadSanitizer gets its own build directory, since it cannot share one
+  with ASan (see [08-build.md](08-build.md)). Run `tools/check.sh` whenever
+  the channel, the job pool, logging or flecs workers change — TSan has
+  caught a race in every one of those, including one introduced the same day.
 - Integration tests for the async loader and channels are deterministic:
   bounded queues, explicit drain loops, no sleeps-as-synchronization
   ([09-testing.md](09-testing.md)).

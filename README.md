@@ -29,6 +29,14 @@ nothing needs installing first.
 TSan cannot share a build with ASan, and its runs exclude the GPU test:
 `ctest --test-dir build/tsan -LE render`.
 
+```sh
+tools/check.sh            # all three configurations plus the examples
+tools/check.sh --quick    # debug only, for a fast inner loop
+```
+
+There is no CI. That script is the whole verification story, and each
+configuration has caught bugs the others missed.
+
 ## Examples
 
 | Example | Shows |
@@ -49,6 +57,16 @@ MYE_SCREENSHOT=shot.png MYE_MAX_FRAMES=60 ./build/debug/examples/example_03_scen
 
 A bounded run exits through `mye_shutdown`, which reports allocator leaks, so
 `echo $?` after one is a real check rather than a formality.
+
+Debug builds also serve the world to the **flecs Explorer** -- a live view of
+every entity, component and system, editable while the game runs:
+
+```
+https://www.flecs.dev/explorer/?host=localhost:27750
+```
+
+and **F3** toggles an on-screen overlay with frame times, memory, asset counts
+and warning totals (`MYE_OVERLAY=1` to start with it open).
 
 ## The shape of a game
 

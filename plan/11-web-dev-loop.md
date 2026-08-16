@@ -278,7 +278,9 @@ desktop-only and simply do not apply to this build.
 3. **`MYE_THREADS_NONE`** backend in `thread.h`.
 4. **`tools/web_dev.py`**: serve, watch, rebuild, reload (tier 1).
 5. **Tier 2 snapshot/restore** on top of the existing serializer.
-6. **CI compiles the web target**, so desktop work cannot silently break it.
+6. **A build-check script** that compiles the web target, so desktop work
+   does not silently break it. There is no CI; this is one more command in
+   the by-hand verification sequence.
 7. **`mye_run()` and loop inversion** -- last, and only if ASYNCIFY's size or
    speed cost is measured to matter.
 

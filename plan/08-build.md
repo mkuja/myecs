@@ -108,5 +108,6 @@ ctest --test-dir build/debug --output-on-failure
 
 `compile_commands.json` is exported (`CMAKE_EXPORT_COMPILE_COMMANDS ON`) for
 clangd. A `.clang-format` (C, 4 spaces, 100 cols) and `clang-tidy` config
-(bugprone/cert/readability subsets) land in M3; CI runs format-check +
-tidy + the full sanitized suite on every push once a repo exists.
+(bugprone/cert/readability subsets) are optional extras, not yet added.
+There is no CI: the three build configurations are run by hand
+(see [09-testing.md](09-testing.md)).

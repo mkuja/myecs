@@ -33,9 +33,27 @@ ECS_COMPONENT_DECLARE(MyeRender3dState);
 /* A small directional-light shader. raylib ships its lighting example as
  * `rlights.h` under examples/ rather than in the library, so the engine
  * carries its own -- kept deliberately minimal: N directional lights, one
- * ambient term, Lambert diffuse plus a Blinn-Phong highlight. */
+ * ambient term, Lambert diffuse plus a Blinn-Phong highlight.
+ *
+ * Desktop GL wants "#version 330"; WebGL 2 wants "#version 300 es" plus an
+ * explicit precision. Those are the ONLY differences: GLSL ES 300 and GLSL
+ * 330 both use in/out, texture() and a declared output, so the body below is
+ * shared verbatim and there is no second shader to keep in step.
+ *
+ * WebGL 1 (GLSL ES 100) is deliberately out of scope -- it would need
+ * varying/attribute, texture2D and gl_FragColor, i.e. a genuine second
+ * shader. See plan/11-web-dev-loop.md.
+ *
+ * highp rather than mediump: precision qualifiers are ignored on desktop but
+ * mediump can visibly band lighting gradients. */
+#if defined(PLATFORM_WEB)
+#define MYE_GLSL_VERSION "#version 300 es\nprecision highp float;\n"
+#else
+#define MYE_GLSL_VERSION "#version 330\n"
+#endif
+
 static const char *vertex_shader_src =
-    "#version 330\n"
+    MYE_GLSL_VERSION
     "in vec3 vertexPosition;\n"
     "in vec2 vertexTexCoord;\n"
     "in vec3 vertexNormal;\n"
@@ -56,7 +74,7 @@ static const char *vertex_shader_src =
     "}\n";
 
 static const char *fragment_shader_src =
-    "#version 330\n"
+    MYE_GLSL_VERSION
     "in vec3 fragPosition;\n"
     "in vec2 fragTexCoord;\n"
     "in vec4 fragColor;\n"

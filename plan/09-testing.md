@@ -120,8 +120,28 @@ set_tests_properties(int_render_sprites PROPERTIES LABELS "render" TIMEOUT 30)
   recorded numbers in the M7 profiling pass, not an assertion that flakes on
   a busy machine.
 
-## CI expectation (once the repo is hosted)
+## Verification, in practice
 
-Per push: configure + build Debug (warnings-as-errors, ASan+UBSan) → `ctest -LE render`
-→ configure + build Release → format/tidy check. From M4 on, an additional
-TSan job runs the concurrency-related tests.
+There is **no CI**, by decision -- this is a local project with no host. The
+three configurations are run by hand, and the whole suite is fast enough that
+this is not a burden:
+
+```sh
+cmake --build build/debug   -j && ctest --test-dir build/debug
+cmake --build build/release -j && ctest --test-dir build/release
+cmake --build build/tsan    -j && ctest --test-dir build/tsan -LE render
+```
+
+Debug catches memory errors and leaks (ASan/UBSan), Release catches what only
+the optimiser diagnoses -- strict-aliasing violations, for one, which `-O0`
+does not analyse -- and TSan catches races. All three matter: each has caught
+a bug the others missed.
+
+Windowed examples are checked the same way, since a bounded run exits through
+`mye_shutdown` and reports leaks:
+
+```sh
+MYE_MAX_FRAMES=150 ./build/debug/examples/example_02_asteroids; echo $?
+```
+
+If this is ever hosted, that shell sequence is the whole CI job.
