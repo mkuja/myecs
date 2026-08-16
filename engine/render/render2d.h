@@ -17,22 +17,12 @@
 
 #include "asset/asset.h"
 #include "core/engine.h"
+/* The 2D placement components live in the transform module: they belong to
+ * the hierarchy, not to the renderer, and the renderer is only one of their
+ * consumers. */
+#include "scene/transform.h"
 
 #include <raylib.h>
-
-/* World-space position. Shared by 2D gameplay and rendering. */
-typedef struct MyePosition2D {
-    float x, y;
-} MyePosition2D;
-
-/* Radians, clockwise, 0 = facing right. */
-typedef struct MyeRotation2D {
-    float angle;
-} MyeRotation2D;
-
-typedef struct MyeScale2D {
-    float x, y;
-} MyeScale2D;
 
 typedef struct MyeSprite {
     mye_texture texture;
@@ -102,9 +92,6 @@ typedef struct MyeRenderConfig {
     Color clear_color;
 } MyeRenderConfig;
 
-extern ECS_COMPONENT_DECLARE(MyePosition2D);
-extern ECS_COMPONENT_DECLARE(MyeRotation2D);
-extern ECS_COMPONENT_DECLARE(MyeScale2D);
 extern ECS_COMPONENT_DECLARE(MyeSprite);
 extern ECS_COMPONENT_DECLARE(MyeSpriteAnim);
 extern ECS_COMPONENT_DECLARE(MyeInterpolate);

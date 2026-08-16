@@ -23,6 +23,22 @@
 
 #include <raylib.h>
 
+/* ------------------------------------------------------------ 2D placement -- */
+
+/* World-space position. Shared by 2D gameplay and rendering. */
+typedef struct MyePosition2D {
+    float x, y;
+} MyePosition2D;
+
+/* Radians, clockwise, 0 = facing right. */
+typedef struct MyeRotation2D {
+    float angle;
+} MyeRotation2D;
+
+typedef struct MyeScale2D {
+    float x, y;
+} MyeScale2D;
+
 /* ------------------------------------------------------------ 3D placement -- */
 
 typedef struct MyePosition3D {
@@ -47,6 +63,9 @@ typedef struct MyeWorldTransform {
     Matrix m;
 } MyeWorldTransform;
 
+extern ECS_COMPONENT_DECLARE(MyePosition2D);
+extern ECS_COMPONENT_DECLARE(MyeRotation2D);
+extern ECS_COMPONENT_DECLARE(MyeScale2D);
 extern ECS_COMPONENT_DECLARE(MyePosition3D);
 extern ECS_COMPONENT_DECLARE(MyeRotation3D);
 extern ECS_COMPONENT_DECLARE(MyeScale3D);

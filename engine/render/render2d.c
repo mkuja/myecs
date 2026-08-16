@@ -2,9 +2,6 @@
 
 #include <stdlib.h>
 
-ECS_COMPONENT_DECLARE(MyePosition2D);
-ECS_COMPONENT_DECLARE(MyeRotation2D);
-ECS_COMPONENT_DECLARE(MyeScale2D);
 ECS_COMPONENT_DECLARE(MyeSprite);
 ECS_COMPONENT_DECLARE(MyeSpriteAnim);
 ECS_COMPONENT_DECLARE(MyeInterpolate);
@@ -135,6 +132,8 @@ static void MyeRenderSprites(ecs_iter_t *it)
         const MyeRotation2D *rotations = ecs_field(&iter, MyeRotation2D, 2);
         const MyeScale2D *scales = ecs_field(&iter, MyeScale2D, 3);
         const MyeInterpolate *interp = ecs_field(&iter, MyeInterpolate, 4);
+        const MyeWorldTransform *world_tf =
+            ecs_field(&iter, MyeWorldTransform, 5);
 
         for (int i = 0; i < iter.count && count < total; ++i) {
             const Texture2D *texture =
@@ -157,6 +156,17 @@ static void MyeRenderSprites(ecs_iter_t *it)
              * opted in. The result stays local to the draw list: it is never
              * written back, so nothing else can mistake it for the
              * simulation's position. */
+            /* Where to draw, in order of precedence:
+             *   1. blended between the last two fixed steps, if opted in;
+             *   2. the world transform, if the entity is in a hierarchy --
+             *      a child's MyePosition2D is only its offset from its
+             *      parent, so drawing that directly would put it near the
+             *      origin;
+             *   3. its plain position.
+             *
+             * Interpolation wins over the hierarchy because the two do not
+             * combine yet: an interpolated child would need its parent's
+             * previous transform too. */
             float draw_x = positions[i].x;
             float draw_y = positions[i].y;
             if (interp != NULL && !interp[i].snap) {
@@ -164,6 +174,10 @@ static void MyeRenderSprites(ecs_iter_t *it)
                          (positions[i].x - interp[i].prev_x) * alpha;
                 draw_y = interp[i].prev_y +
                          (positions[i].y - interp[i].prev_y) * alpha;
+            } else if (world_tf != NULL) {
+                Vector3 world_pos = mye_matrix_translation(world_tf[i].m);
+                draw_x = world_pos.x;
+                draw_y = world_pos.y;
             }
 
             items[count++] = (draw_item){
@@ -363,9 +377,10 @@ void MyeRender2dModuleImport(ecs_world_t *world)
 {
     ECS_MODULE(world, MyeRender2dModule);
 
-    ECS_COMPONENT_DEFINE(world, MyePosition2D);
-    ECS_COMPONENT_DEFINE(world, MyeRotation2D);
-    ECS_COMPONENT_DEFINE(world, MyeScale2D);
+    /* The sprite pass reads MyeWorldTransform and the placement components,
+     * so they must exist before its query is built. */
+    ECS_IMPORT(world, MyeTransformModule);
+
     ECS_COMPONENT_DEFINE(world, MyeSprite);
     ECS_COMPONENT_DEFINE(world, MyeSpriteAnim);
     ECS_COMPONENT_DEFINE(world, MyeInterpolate);
@@ -389,6 +404,10 @@ void MyeRender2dModuleImport(ecs_world_t *world)
             { .id = ecs_id(MyeRotation2D), .inout = EcsIn, .oper = EcsOptional },
             { .id = ecs_id(MyeScale2D), .inout = EcsIn, .oper = EcsOptional },
             { .id = ecs_id(MyeInterpolate), .inout = EcsIn,
+              .oper = EcsOptional },
+            /* Present when the entity takes part in the transform hierarchy;
+             * for a child, this is where the parent has actually put it. */
+            { .id = ecs_id(MyeWorldTransform), .inout = EcsIn,
               .oper = EcsOptional },
             { .id = ecs_id(MyeHidden), .oper = EcsNot },
         },

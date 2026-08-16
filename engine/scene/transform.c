@@ -1,9 +1,10 @@
 #include "scene/transform.h"
 
-#include "render/render2d.h"
-
 #include <raymath.h>
 
+ECS_COMPONENT_DECLARE(MyePosition2D);
+ECS_COMPONENT_DECLARE(MyeRotation2D);
+ECS_COMPONENT_DECLARE(MyeScale2D);
 ECS_COMPONENT_DECLARE(MyePosition3D);
 ECS_COMPONENT_DECLARE(MyeRotation3D);
 ECS_COMPONENT_DECLARE(MyeScale3D);
@@ -133,6 +134,9 @@ void MyeTransformModuleImport(ecs_world_t *world)
 {
     ECS_MODULE(world, MyeTransformModule);
 
+    ECS_COMPONENT_DEFINE(world, MyePosition2D);
+    ECS_COMPONENT_DEFINE(world, MyeRotation2D);
+    ECS_COMPONENT_DEFINE(world, MyeScale2D);
     ECS_COMPONENT_DEFINE(world, MyePosition3D);
     ECS_COMPONENT_DEFINE(world, MyeRotation3D);
     ECS_COMPONENT_DEFINE(world, MyeScale3D);

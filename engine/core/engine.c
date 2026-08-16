@@ -287,8 +287,8 @@ ecs_world_t *mye_init(const mye_config *config)
     ECS_IMPORT(world, MyeInputModule);
     ECS_IMPORT(world, MyeAssetsModule);
     ECS_IMPORT(world, MyeAudioModule);
-    ECS_IMPORT(world, MyeRender2dModule);
     ECS_IMPORT(world, MyeTransformModule);
+    ECS_IMPORT(world, MyeRender2dModule);
     ECS_IMPORT(world, MyeSceneModule);
     mye_serialize_register_engine_components(world);
     ECS_IMPORT(world, MyeRender3dModule);
