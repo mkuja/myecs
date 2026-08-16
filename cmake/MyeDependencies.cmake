@@ -26,6 +26,37 @@ FetchContent_Declare(flecs
     GIT_SHALLOW    TRUE
     SYSTEM)
 
+# -------------------------------------------------------- libwebsockets ----
+# Native only: a web build gets its WebSocket from the browser, so shipping a
+# protocol implementation into the wasm would be dead weight. See
+# plan/12-networking.md.
+#
+# MIT (a few files are BSD/CC0/ZLIB -- see THIRD-PARTY-NOTICES.md). Trimmed
+# hard: no TLS (N2 decides that), no extensions (permessage-deflate is the
+# only one, and it would pull in zlib), no test apps or examples.
+if(NOT EMSCRIPTEN)
+    set(LWS_WITH_SSL              OFF CACHE BOOL "" FORCE)
+    set(LWS_WITHOUT_EXTENSIONS    ON  CACHE BOOL "" FORCE)
+    set(LWS_WITH_STATIC           ON  CACHE BOOL "" FORCE)
+    set(LWS_WITH_SHARED           OFF CACHE BOOL "" FORCE)
+    set(LWS_WITHOUT_TESTAPPS      ON  CACHE BOOL "" FORCE)
+    set(LWS_WITHOUT_TEST_SERVER   ON  CACHE BOOL "" FORCE)
+    set(LWS_WITHOUT_TEST_CLIENT   ON  CACHE BOOL "" FORCE)
+    set(LWS_WITH_MINIMAL_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(LWS_WITH_NETLINK          OFF CACHE BOOL "" FORCE)
+    set(LWS_ROLE_RAW_PROXY        OFF CACHE BOOL "" FORCE)
+    # lws_service() sleeps until an event arrives -- fine for a dedicated
+    # network thread, fatal inside a frame. External poll hands us the file
+    # descriptors so the engine can poll them with a zero timeout instead.
+    set(LWS_WITH_EXTERNAL_POLL    ON  CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(libwebsockets
+        GIT_REPOSITORY https://github.com/warmcat/libwebsockets.git
+        GIT_TAG        v4.5.8
+        GIT_SHALLOW    TRUE
+        SYSTEM)
+endif()
+
 # raylib generates install(EXPORT) rules that would demand mye_alloc be part
 # of its export set once we link it in below. We never install these targets,
 # so skip install rules for the dependencies and restore them afterwards.
@@ -33,6 +64,14 @@ set(_mye_skip_install_backup ${CMAKE_SKIP_INSTALL_RULES})
 set(CMAKE_SKIP_INSTALL_RULES ON)
 
 FetchContent_MakeAvailable(raylib flecs)
+if(NOT EMSCRIPTEN)
+    FetchContent_MakeAvailable(libwebsockets)
+
+    # libwebsockets uses POSIX (localtime_r, and more), which -std=c11 hides.
+    # Grant GNU extensions to the dependency alone, exactly as raylib gets
+    # them for EM_ASM: our own targets stay strict ISO C11.
+    set_target_properties(websockets PROPERTIES C_EXTENSIONS ON)
+endif()
 
 set(CMAKE_SKIP_INSTALL_RULES ${_mye_skip_install_backup})
 

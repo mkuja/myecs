@@ -13,6 +13,9 @@ add_library(engine STATIC
     scene/scene.c
     scene/serialize.c
     scene/transform.c
+    net/net.c
+    $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:net/net_lws.c>
+    $<$<BOOL:${EMSCRIPTEN}>:net/net_web.c>
 )
 
 target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -20,3 +23,11 @@ find_package(Threads REQUIRED)
 target_link_libraries(engine
     PRIVATE mye_flags
     PUBLIC  mye_alloc raylib flecs::flecs_static Threads::Threads)
+
+if(EMSCRIPTEN)
+    # The browser's WebSocket lives in JS; this links the glue emscripten
+    # ships for it. No protocol library is compiled into the wasm.
+    target_link_options(engine PUBLIC -lwebsocket.js)
+else()
+    target_link_libraries(engine PUBLIC websockets)
+endif()

@@ -177,6 +177,23 @@ Vendored by raylib: M3D model loading.
  *  stb_image - v2.13 - public domain image loader - http://nothings.org/stb_image.h
 ```
 
+## libwebsockets
+
+Fetched by CMake for native builds only (v4.5.8); a web build uses the
+browser's own WebSocket and links none of this. Licence verified against the
+upstream LICENSE file at pin time.
+
+```
+Libwebsockets and included programs are provided under the terms of the
+MIT license shown below, with the exception that some sources are under
+a similar permissive license like BSD, or are explicitly CC0 / public
+domain to remove any obstacles from basing differently-licensed code on
+them.
+```
+
+Built with TLS and extensions off, so the mbedtls wrapper (Apache 2.0) and
+zlib-derived pieces are not compiled in.
+
 ## Sample assets
 
 Not part of the source tree -- `assets/` is gitignored and populated by

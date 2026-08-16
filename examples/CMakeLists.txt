@@ -24,13 +24,16 @@ target_link_libraries(example_05_showcase PRIVATE mye_flags engine)
 add_executable(example_06_tutorial 06_tutorial/main.c)
 target_link_libraries(example_06_tutorial PRIVATE mye_flags engine)
 
+add_executable(example_07_net 07_net/main.c)
+target_link_libraries(example_07_net PRIVATE mye_flags engine)
+
 # Web builds: shell page, ASYNCIFY, growable heap. Defined in
 # cmake/MyeWeb.cmake, which is only included under emcmake.
 if(EMSCRIPTEN)
     foreach(target
             example_00_hello example_01_bounce example_02_asteroids
             example_03_scene3d example_04_stress
-            example_06_tutorial)
+            example_06_tutorial example_07_net)
         mye_web_configure(${target})
     endforeach()
 
