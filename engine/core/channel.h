@@ -1,7 +1,7 @@
 /* Bounded lock-free queue for passing messages between threads.
  * See plan/05-concurrency.md.
  *
- * This is the "channel" in the Tokio/Rayon sense: threads exchange *messages*
+ * A channel in the usual sense: threads exchange *messages*
  * (plain structs, copied in and out), never shared mutable state. An
  * ecs_entity_t is a 64-bit id and is safe to put in a message; the receiving
  * side touches the world only from the main thread.

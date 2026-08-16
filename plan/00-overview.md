@@ -13,8 +13,8 @@ foundations:
 
 The engine's job is everything *between* those layers and a game: scene
 management, rendering systems, asset management, input mapping, memory
-allocators, and a concurrency model — organized as ECS modules the way Bevy
-organizes plugins.
+allocators, and a concurrency model — organized as ECS modules, each one a
+function that registers its components and systems into the world.
 
 **Guiding principles**
 
@@ -99,14 +99,14 @@ editor tooling · scripting (e.g. Lua) · networking.
 | **Draw call** | One command asking the GPU to draw something. Fewer = faster; batching merges many sprites into one call (raylib does this). |
 | **Asset** | Data loaded from disk: texture, model, sound, font. |
 | **Handle** | A small ID referring to an asset, instead of a raw pointer — stays valid-checkable after unloads. |
-| **Archetype ECS** | ECS storage strategy (used by flecs and Bevy) grouping entities with identical component sets into contiguous tables — fast iteration. |
+| **Archetype ECS** | ECS storage strategy grouping entities with identical component sets into contiguous tables — fast iteration. |
 | **Scene** | A self-contained set of entities + the assets they need, loaded/unloaded as a unit (a level, a menu). |
 | **Prefab** | A template entity that spawned entities copy/inherit from. |
 
 ## Document map
 
 - [01-architecture.md](01-architecture.md) — layers, repo layout, main loop
-- [02-ecs.md](02-ecs.md) — flecs usage, Bevy→flecs mapping, core components
+- [02-ecs.md](02-ecs.md) — flecs usage, ECS vocabulary, core components
 - [03-rendering.md](03-rendering.md) — 2D/3D rendering design
 - [04-memory.md](04-memory.md) — allocator strategy
 - [05-concurrency.md](05-concurrency.md) — parallelism & channels

@@ -52,8 +52,8 @@ Rules:
 
 - Alignment-correct by construction (`align` parameter, power of two;
   `MYE_DEFAULT_ALIGN` = `_Alignof(max_align_t)`).
-- **Sizes are passed back on free** (`mye_free(a, ptr, size)`, Zig/Odin
-  style). Arenas and pools then need zero per-allocation metadata, and
+- **Sizes are passed back on free** (`mye_free(a, ptr, size)`). Arenas and
+  pools then need zero per-allocation metadata, and
   tracking accounts bytes exactly without headers. Callers always know the
   size — it is `sizeof(T)` or the capacity they asked for, and the
   `MYE_DELETE`/`MYE_DELETE_ARRAY` macros supply it.

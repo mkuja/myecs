@@ -20,14 +20,14 @@ Worked examples in this codebase:
 | `mye_jobs.pending`, `.stopping` | atomics | single writer per transition, stale read is harmless |
 | `mye_channel` | mutex + condvar | a handful of messages per frame is not a hot spot, and it is multi-producer with messages that must not be lost — which fails the lock-free gate outright |
 
-## Honest framing (Tokio? Rayon?)
+## What a game engine actually needs from concurrency
 
-C's standard library has no equivalent of Tokio or Rayon. But a game engine
-doesn't want an async I/O runtime (Tokio solves massive concurrent I/O —
-servers). What a game wants is:
+C's standard library gives you threads and atomics and nothing above them.
+A game does not need a general async I/O runtime -- that solves the server
+problem, thousands of concurrent connections. A game needs three things:
 
-1. **Data-parallel systems** (the Rayon-shaped need) — run one system's
-   entity iteration across cores.
+1. **Data-parallel systems** — run one system's entity iteration across
+   cores.
 2. **Background jobs** — file I/O and decoding off the main thread.
 3. **Channels** — safe messages between threads.
 
@@ -36,8 +36,7 @@ Nothing here is C++; nothing here is hand-rolled lock-free code.
 
 ## 1. Parallel systems — flecs pipeline workers
 
-flecs has a built-in worker-thread pipeline (its docs call it exactly the
-Rayon-style model):
+flecs has a built-in worker-thread pipeline:
 
 ```c
 ecs_set_threads(world, 8);              // spawn workers (uses OS threads)
@@ -81,8 +80,8 @@ bool mye_jobs_submit(mye_job_fn fn, void *arg);   // enqueue, wakes a worker
 Jobs must be self-contained: they own their inputs, produce a result message,
 and push it into a channel. They never touch the ECS world (flecs worlds are
 not thread-safe from outside `ecs_progress`) and never call raylib GPU/window
-functions. If later demos need Rayon-style `parallel_for` over raw arrays,
-extend this pool — but flecs already covers the common case.
+functions. If later demos need a parallel-for over raw arrays, extend this
+pool — but flecs already covers the common case.
 
 ## 3. Channels — Concurrency Kit
 

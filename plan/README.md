@@ -8,7 +8,7 @@ Design documents for a 2D + 3D game engine in strict C11, built on
 |---|---|
 | [00-overview.md](00-overview.md) | Vision, prioritized feature list, non-goals, beginner glossary |
 | [01-architecture.md](01-architecture.md) | Layers, repo layout, main loop & frame phases |
-| [02-ecs.md](02-ecs.md) | flecs usage, Bevy→flecs mapping, core components |
+| [02-ecs.md](02-ecs.md) | flecs usage, ECS vocabulary, core components |
 | [03-rendering.md](03-rendering.md) | 2D & 3D passes, main-thread rule, mixed scenes |
 | [04-memory.md](04-memory.md) | Arena/frame/pool allocators, TLSF, tracking, ownership |
 | [05-concurrency.md](05-concurrency.md) | flecs workers, job pool, channels (Concurrency Kit) |

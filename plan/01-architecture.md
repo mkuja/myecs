@@ -25,8 +25,8 @@ call raylib directly (exception: examples may, while the engine is young).
 
 ## Engine modules are flecs modules
 
-This mirrors Bevy's plugin model. Each engine subsystem is a flecs *module*: a
-function that registers its components, systems, and singletons into the world.
+Each engine subsystem is a flecs *module*: a function that registers its
+components, systems and singletons into the world.
 
 ```c
 // engine/render/render2d.h
@@ -38,7 +38,7 @@ ECS_IMPORT(world, MyeRender2d);
 
 A game is then: create world → import engine modules → register game
 components/systems → load a scene → run the loop. Adding a capability to a
-game = importing a module, exactly like `App::add_plugins` in Bevy.
+game = importing a module.
 
 Naming: public engine symbols use the `mye_` / `Mye` prefix (my-ecs) to avoid
 collisions with raylib and flecs.

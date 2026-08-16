@@ -1,30 +1,28 @@
 # 02 — ECS Design (flecs)
 
 We use [flecs](https://github.com/SanderMertens/flecs) v4 (pure C99,
-single-header option available) as the ECS core. It is archetype-based like
-Bevy's ECS: entities with identical component sets are stored in contiguous
-tables, so systems iterate over dense arrays.
+single-header option available) as the ECS core. It is **archetype-based**:
+entities with identical component sets are stored together in contiguous
+tables, so a system iterating them walks dense arrays rather than chasing
+pointers.
 
-## Bevy → flecs mapping
+## The vocabulary, and what each idea is called here
 
-If a tutorial or idea is described in Bevy terms, translate with this table:
-
-| Bevy concept | flecs equivalent | Notes |
+| Idea | In this engine | Notes |
 |---|---|---|
-| `World` | `ecs_world_t` | Create with `ecs_init()` |
-| `#[derive(Component)]` | `ECS_COMPONENT(world, T)` | Registers a plain C struct |
-| System (`fn sys(query: Query<...>)`) | `ECS_SYSTEM(world, fn, Phase, Pos, Vel)` | The signature *is* the query |
-| `Query<(&mut Pos, &Vel)>` | `ecs_query_t` / system terms | `ecs_field(it, Pos, 0)` in the callback |
-| Schedule stages / system sets | Pipeline phases (`EcsOnLoad` … `EcsOnStore`) | Custom phases possible; ordering via `DependsOn` |
-| `Res<T>` / `ResMut<T>` (resources) | Singleton: `ecs_singleton_set(world, T, {...})` | A component stored on its own entity |
-| `Events<T>` / `EventReader` | Observers: `ecs_observer` + `ecs_emit` | Also fire on component add/set/remove |
-| `Commands` (deferred ops) | Automatic: structural changes inside systems are deferred until merge | `ecs_defer_begin/end` for manual control |
-| Plugin | Module: `ECS_MODULE` + `ECS_IMPORT` | Our engine subsystems are modules |
-| `Parent` / `Children` | `EcsChildOf` relationship: `ecs_add_pair(w, child, EcsChildOf, parent)` | Deleting a parent deletes children by default |
-| Bundles | Prefabs (`EcsPrefab`) or plain helper functions | `ecs_add_pair(w, e, EcsIsA, prefab)` |
-| `Changed<T>` / change detection | `ecs_query_desc_t` change detection, `flecs.pipeline` handles system ordering | Also observers on `OnSet` |
-| `bevy_reflect` / scenes | flecs reflection + JSON serialization | Used for scene save/load in M6 |
-| Rayon-parallel systems | `ecs_set_threads(world, n)` + `.multi_threaded = true` on a system | flecs shards matched tables across workers |
+| the container for everything | `ecs_world_t` | created by `mye_init()` |
+| a component type | `ECS_COMPONENT_DEFINE(world, T)` | a plain C struct; no base class, no interface |
+| a system | `ECS_SYSTEM(world, Fn, Phase, Pos, Vel)` | the component list *is* the query |
+| a query | system terms, or `ecs_query()` for standalone use | read fields with `ecs_field(it, Pos, 0)` |
+| when a system runs | pipeline phases (`EcsOnLoad` … `EcsOnStore`) | custom phases via `DependsOn` |
+| global state | singleton: `ecs_singleton_set(world, T, {...})` | a component stored on its own type's entity |
+| events | observers: `ecs_observer` + `ecs_emit` | also fire on component add/set/remove |
+| deferred changes | automatic inside systems | structural edits are queued until the merge point |
+| a reusable subsystem | module: `ECS_MODULE` + `ECS_IMPORT` | the engine's own subsystems are modules |
+| parent and child | `EcsChildOf` pair: `ecs_add_pair(w, child, EcsChildOf, parent)` | deleting a parent deletes its children |
+| an entity template | prefab (`EcsPrefab`) + `EcsIsA` pair | components are copied to instances by default |
+| reflection / saved scenes | flecs reflection + JSON serialization | scene save/load, M6 |
+| data-parallel systems | `ecs_set_threads(world, n)` + `.multi_threaded = true` | flecs shards matched tables across workers |
 
 ## Core components (defined by the engine)
 
