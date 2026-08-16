@@ -73,7 +73,8 @@ work is spent on them now:
 
 skeletal animation · custom shaders & post-processing · particle systems ·
 3D physics (e.g. Jolt has no C API — candidate: ODE or a C wrapper) ·
-editor tooling · scripting (e.g. Lua) · networking.
+editor tooling · scripting (e.g. Lua) · networking (now planned --
+see [12-networking.md](12-networking.md)).
 
 ## Non-goals
 
