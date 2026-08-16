@@ -1,83 +1,100 @@
 /* Browser WebSocket backend. See plan/12-networking.md.
  *
- * The browser owns the socket, so there is no protocol library here and
- * nothing of libwebsockets reaches the wasm. Callbacks fire on the main
- * thread and only ever push into the receive queue. Nothing calls game code
- * from inside a callback.
+ * The socket lives in JavaScript and its event handlers touch nothing but
+ * JavaScript state: incoming messages go into a JS array, and status is a
+ * number. Our pump then reaches *out* to collect them.
  *
- * STATUS: partially verified. In a headless browser this connects, completes
- * the handshake, and delivers a message that a native relay confirms
- * receiving. What has NOT been observed working is the browser receiving a
- * message back, or the game loop continuing to send after the first frame --
- * a run of any length produces exactly one outbound message. The cause is
- * not yet identified; the obvious suspect, ASYNCIFY re-entrancy from an
- * inbound callback, was ruled out by pointing the client at a relay that
- * never echoes and seeing the same single message. Treat the receive path
- * here as unproven until there is a test that demonstrates it.
+ * That direction matters, and it is the whole reason this file does not use
+ * emscripten/websocket.h. With ASYNCIFY the game loop spends most of its
+ * time unwound, and a socket event that calls back into wasm re-enters it
+ * mid-unwind. The symptom is not a crash: the loop simply stops advancing --
+ * an open connection, a rendered first frame, and a frame counter frozen at
+ * 1 forever. Keeping every wasm entry inside our own loop avoids it by
+ * construction, which is what the plan asked for and what the first attempt
+ * failed to do.
  */
 #include "net/net_internal.h"
 
-#include <emscripten/websocket.h>
+#include <emscripten/emscripten.h>
+
+/* Status codes shared with the JS below; kept numeric because they cross a
+ * language boundary. */
+#define WEB_CONNECTING 1
+#define WEB_OPEN 2
+#define WEB_CLOSED 3
+#define WEB_ERROR 4
+
+EM_JS(int, mye_ws_open, (const char *url, const char *protocol), {
+    var sockets = (Module.myeSockets = Module.myeSockets || []);
+    var slot = { ws: null, status: 1, queue: [] };
+
+    try {
+        slot.ws = new WebSocket(UTF8ToString(url), UTF8ToString(protocol));
+    } catch (e) {
+        return -1;
+    }
+    slot.ws.binaryType = 'arraybuffer';
+
+    /* Deliberately no calls into wasm from any of these. */
+    slot.ws.onopen = function() { slot.status = 2; };
+    slot.ws.onclose = function() { if (slot.status != 4) slot.status = 3; };
+    slot.ws.onerror = function() { slot.status = 4; };
+    slot.ws.onmessage = function(event) {
+        if (typeof event.data === 'string') {
+            slot.queue.push(new TextEncoder().encode(event.data));
+        } else {
+            slot.queue.push(new Uint8Array(event.data));
+        }
+    };
+
+    sockets.push(slot);
+    return sockets.length - 1;
+})
+
+EM_JS(int, mye_ws_status, (int handle), {
+    var s = Module.myeSockets[handle];
+    return s ? s.status : 4;
+})
+
+EM_JS(int, mye_ws_pending, (int handle), {
+    var s = Module.myeSockets[handle];
+    return (s && s.queue.length) ? s.queue.length : 0;
+})
+
+/* Copies the oldest message into wasm memory and drops it. Returns its size,
+ * 0 when the queue is empty, or -1 when it would not fit -- the caller then
+ * drops it, matching the native backend's "never truncate" rule. */
+EM_JS(int, mye_ws_take, (int handle, unsigned char *destination, int capacity), {
+    var s = Module.myeSockets[handle];
+    if (!s || !s.queue.length) return 0;
+    var message = s.queue[0];
+    if (message.length > capacity) { s.queue.shift(); return -1; }
+    HEAPU8.set(message, destination);
+    s.queue.shift();
+    return message.length;
+})
+
+EM_JS(int, mye_ws_send, (int handle, const unsigned char *data, int size), {
+    var s = Module.myeSockets[handle];
+    if (!s || !s.ws || s.ws.readyState !== 1) return 0;
+    /* Copied, not a view: the socket may keep it past this call, and the
+     * wasm heap moves when it grows. */
+    s.ws.send(new Uint8Array(HEAPU8.subarray(data, data + size)));
+    return 1;
+})
+
+EM_JS(void, mye_ws_close, (int handle), {
+    var s = Module.myeSockets[handle];
+    if (s && s.ws) { try { s.ws.close(); } catch (e) {} s.ws = null; }
+})
+
+EM_JS(int, mye_ws_supported, (void), {
+    return (typeof WebSocket !== 'undefined') ? 1 : 0;
+})
 
 typedef struct web_backend {
-    EMSCRIPTEN_WEBSOCKET_T socket;
-    mye_net_conn *conn;
+    int handle;
 } web_backend;
-
-static EM_BOOL on_open(int type, const EmscriptenWebSocketOpenEvent *event,
-                       void *user)
-{
-    (void)type;
-    (void)event;
-    mye_net_conn *conn = (mye_net_conn *)user;
-    conn->status = MYE_NET_OPEN;
-    mye_log_info("net: connected");
-    return EM_TRUE;
-}
-
-static EM_BOOL on_message(int type, const EmscriptenWebSocketMessageEvent *event,
-                          void *user)
-{
-    (void)type;
-    mye_net_conn *conn = (mye_net_conn *)user;
-
-    /* The browser hands over whole messages -- it reassembles fragments
-     * itself -- so unlike the native backend there is nothing to stitch. */
-    if (!mye_net_queue_push(&conn->in, event->data, event->numBytes, 0)) {
-        mye_log_warn("net: receive queue full or message too large; dropped "
-                     "%u bytes",
-                     (unsigned)event->numBytes);
-        return EM_TRUE;
-    }
-    conn->bytes_in += event->numBytes;
-    return EM_TRUE;
-}
-
-static EM_BOOL on_error(int type, const EmscriptenWebSocketErrorEvent *event,
-                        void *user)
-{
-    (void)type;
-    (void)event;
-    mye_net_conn *conn = (mye_net_conn *)user;
-    conn->status = MYE_NET_ERROR;
-    /* The browser deliberately withholds the reason from script, to avoid
-     * leaking cross-origin information. Check the devtools console. */
-    mye_log_warn("net: connection failed (the browser does not say why; see "
-                 "the devtools console)");
-    return EM_TRUE;
-}
-
-static EM_BOOL on_close(int type, const EmscriptenWebSocketCloseEvent *event,
-                        void *user)
-{
-    (void)type;
-    mye_net_conn *conn = (mye_net_conn *)user;
-    if (conn->status != MYE_NET_ERROR) {
-        conn->status = MYE_NET_CLOSED;
-    }
-    mye_log_info("net: closed (code %d)", event->code);
-    return EM_TRUE;
-}
 
 bool mye_net_can_listen(void)
 {
@@ -91,7 +108,7 @@ mye_net_conn *mye_net_connect(mye_allocator allocator, const char *url,
         mye_log_error("net: no url");
         return NULL;
     }
-    if (!emscripten_websocket_is_supported()) {
+    if (!mye_ws_supported()) {
         mye_log_error("net: this browser has no WebSocket support");
         return NULL;
     }
@@ -106,29 +123,16 @@ mye_net_conn *mye_net_connect(mye_allocator allocator, const char *url,
         mye_net_conn_free(conn);
         return NULL;
     }
-    b->conn = conn;
-    conn->backend = b;
 
-    EmscriptenWebSocketCreateAttributes attr;
-    emscripten_websocket_init_create_attributes(&attr);
-    attr.url = url;
-    attr.protocols = MYE_NET_SUBPROTOCOL;
-    attr.createOnMainThread = EM_TRUE;
-
-    b->socket = emscripten_websocket_new(&attr);
-    if (b->socket <= 0) {
-        mye_log_error("net: could not create a websocket for %s", url);
+    b->handle = mye_ws_open(url, MYE_NET_SUBPROTOCOL);
+    if (b->handle < 0) {
+        mye_log_error("net: the browser refused to open %s", url);
         MYE_DELETE(allocator, b);
-        conn->backend = NULL;
         mye_net_conn_free(conn);
         return NULL;
     }
 
-    emscripten_websocket_set_onopen_callback(b->socket, conn, on_open);
-    emscripten_websocket_set_onmessage_callback(b->socket, conn, on_message);
-    emscripten_websocket_set_onerror_callback(b->socket, conn, on_error);
-    emscripten_websocket_set_onclose_callback(b->socket, conn, on_close);
-
+    conn->backend = b;
     mye_log_info("net: connecting to %s", url);
     return conn;
 }
@@ -151,10 +155,7 @@ void mye_net_destroy(mye_net_conn *conn)
     }
     web_backend *b = (web_backend *)conn->backend;
     if (b != NULL) {
-        if (b->socket > 0) {
-            emscripten_websocket_close(b->socket, 1000, "bye");
-            emscripten_websocket_delete(b->socket);
-        }
+        mye_ws_close(b->handle);
         MYE_DELETE(conn->allocator, b);
         conn->backend = NULL;
     }
@@ -168,10 +169,52 @@ void mye_net_pump(mye_net_conn *conn)
     }
     web_backend *b = (web_backend *)conn->backend;
 
-    /* Receiving needs no pumping -- the browser calls us. Sending is queued
-     * rather than immediate so that the API behaves the same on both
-     * targets: a send before the socket opens waits here instead of being
-     * lost. */
+    switch (mye_ws_status(b->handle)) {
+    case WEB_OPEN:
+        if (conn->status != MYE_NET_OPEN) {
+            conn->status = MYE_NET_OPEN;
+            mye_log_info("net: connected");
+        }
+        break;
+    case WEB_CLOSED:
+        conn->status = MYE_NET_CLOSED;
+        break;
+    case WEB_ERROR:
+        conn->status = MYE_NET_ERROR;
+        break;
+    default:
+        conn->status = MYE_NET_CONNECTING;
+        break;
+    }
+
+    /* Collect whatever the socket buffered since the last frame. Whole
+     * messages only -- the browser reassembles fragments itself. */
+    while (mye_ws_pending(b->handle) > 0) {
+        if (conn->in.count >= conn->in.capacity) {
+            mye_log_warn("net: receive queue full; leaving messages buffered");
+            break;
+        }
+
+        unsigned char scratch[MYE_NET_DEFAULT_MAX_MESSAGE];
+        size_t capacity = conn->config.max_message_size < sizeof scratch
+                              ? conn->config.max_message_size
+                              : sizeof scratch;
+
+        int size = mye_ws_take(b->handle, scratch, (int)capacity);
+        if (size == 0) {
+            break;
+        }
+        if (size < 0) {
+            mye_log_warn("net: dropped a message over max_message_size (%zu)",
+                         capacity);
+            continue;
+        }
+
+        if (mye_net_queue_push(&conn->in, scratch, (size_t)size, 0)) {
+            conn->bytes_in += (uint64_t)size;
+        }
+    }
+
     if (conn->status != MYE_NET_OPEN) {
         return;
     }
@@ -179,13 +222,8 @@ void mye_net_pump(mye_net_conn *conn)
     while (conn->out.count > 0) {
         size_t size = 0;
         unsigned char *bytes = mye_net_queue_at(&conn->out, 0, &size, NULL);
-        if (bytes == NULL) {
-            break;
-        }
-        if (emscripten_websocket_send_binary(b->socket, bytes,
-                                             (uint32_t)size) != EMSCRIPTEN_RESULT_SUCCESS) {
-            mye_log_warn("net: send failed; leaving the message queued");
-            break;
+        if (bytes == NULL || !mye_ws_send(b->handle, bytes, (int)size)) {
+            break; /* not writable yet: leave it queued for the next frame */
         }
         conn->bytes_out += size;
         mye_net_queue_pop(&conn->out);

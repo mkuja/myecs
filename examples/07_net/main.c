@@ -69,7 +69,6 @@ typedef struct Net {
     mye_net_conn *conn;
     int sent;
     int received;
-    double next_send;
     char last[128];
 } Net;
 
@@ -92,14 +91,18 @@ static void NetPump(ecs_iter_t *it)
     if (mye_net_status_of(net->conn) != MYE_NET_OPEN) {
         return;
     }
-    double now = mye_time_now();
-    if (now >= net->next_send) {
+
+    /* Paced by the frame counter, not by a clock: mye_time_now() rests on
+     * timespec_get, and a platform where that fails returns 0.0 forever --
+     * which looks like the network died when in fact nothing was ever sent
+     * a second time. The frame counter is engine state and always advances. */
+    const MyeTime *time = ecs_singleton_get(it->world, MyeTime);
+    if (time != NULL && time->frame % 30 == 0) {
         char line[64];
         int n = snprintf(line, sizeof line, "ping %d", net->sent);
         if (mye_net_send(net->conn, line, (size_t)n)) {
             ++net->sent;
         }
-        net->next_send = now + 1.0;
     }
 }
 
@@ -128,7 +131,17 @@ static void DrawNet(ecs_iter_t *it)
     DrawText(line, 20, 20, 22,
              status == MYE_NET_OPEN ? (Color){ 120, 230, 190, 255 } : ORANGE);
 
-    snprintf(line, 160, "sent %d   received %d", net->sent, net->received);
+    /* Two counters, deliberately: `draws` is incremented right here, while
+     * `frame` comes from the engine. If they disagree, the loop is running
+     * and engine time is not -- which is a very different bug from a stalled
+     * loop, and indistinguishable from it with only one number on screen. */
+    static unsigned long draws;
+    ++draws;
+    const MyeTime *time = ecs_singleton_get(it->world, MyeTime);
+    snprintf(line, 160, "sent %d  received %d  frame %llu  draws %lu  fps %d",
+             net->sent, net->received,
+             (unsigned long long)(time != NULL ? time->frame : 0), draws,
+             GetFPS());
     DrawText(line, 20, 56, 20, RAYWHITE);
 
     snprintf(line, 160, "last echo: %s", net->last[0] != '\0' ? net->last : "-");
