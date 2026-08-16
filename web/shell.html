@@ -82,10 +82,16 @@
 
   window.onerror = (message) => setStatus('error: ' + message, true);
 
-  // Emscripten's {{{ SCRIPT }}} loads the module as the page loads, so the
-  // veil does not gate startup -- it gates the *user gesture*. Browsers
-  // suspend audio until one happens, and the canvas needs focus or key input
-  // goes to the page instead of the game.
+  // NEVER write emscripten's script placeholder token in this file outside
+  // the one place it belongs -- not even inside a comment. It is substituted
+  // by plain text replacement anywhere it appears, so a mention in a comment
+  // expands to a <script> element that closes THIS one, and every line below
+  // it silently becomes body text instead of code.
+  //
+  // The module is loaded by that placeholder as the page loads, so the veil
+  // does not gate startup -- it gates the *user gesture*. Browsers suspend
+  // audio until one happens, and the canvas needs focus or key input goes to
+  // the page instead of the game.
   const start = () => {
     veil.classList.add('hidden');
     canvas.focus();
@@ -94,6 +100,12 @@
   };
   veil.addEventListener('click', start);
   veil.addEventListener('keydown', start);
+
+  // Test seam, mirroring MYE_MAX_FRAMES/MYE_SCREENSHOT on the native builds:
+  // ?autostart skips the gesture so a headless browser can reach the canvas.
+  // Audio stays suspended -- browsers require a real gesture for that, and no
+  // flag of ours can or should change it.
+  if (new URLSearchParams(location.search).has('autostart')) start();
 
   // --- development reload -------------------------------------------------
   // tools/web_dev.py increments /build-id after each successful rebuild.
