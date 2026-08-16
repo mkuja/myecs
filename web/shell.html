@@ -1,0 +1,134 @@
+<!doctype html>
+<!--
+  Page shell for the WebAssembly build. Emscripten substitutes {{{ SCRIPT }}}
+  with the loader for the generated .js/.wasm.
+
+  Three jobs beyond hosting the canvas:
+    1. gate startup behind a click, because browsers refuse to start audio
+       until the user has interacted with the page;
+    2. show load progress and any error, since a blank canvas is otherwise
+       indistinguishable from a crash;
+    3. poll /build-id so tools/web_dev.py can reload the page after a rebuild.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>myecs</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #14161c; color: #d8dce6;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  body { display: grid; place-items: center; }
+  #frame { position: relative; }
+  canvas {
+    display: block; background: #0c0e13; border-radius: 4px;
+    /* Keep the canvas crisp: the engine renders at its own resolution. */
+    image-rendering: pixelated;
+    max-width: 100vw; max-height: 100vh;
+  }
+  canvas:focus { outline: 2px solid #3d6ea8; }
+  #veil {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    background: rgba(12, 14, 19, 0.92); text-align: center; cursor: pointer;
+  }
+  #veil.hidden { display: none; }
+  #title { font-size: 20px; margin-bottom: 8px; }
+  #hint { color: #8c93a6; }
+  #status {
+    position: fixed; left: 10px; bottom: 8px; color: #8c93a6; font-size: 12px;
+  }
+  #status.error { color: #e88a72; }
+</style>
+</head>
+<body>
+
+<div id="frame">
+  <!-- tabindex so the canvas can take keyboard focus for game input -->
+  <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+  <div id="veil">
+    <div>
+      <div id="title">myecs</div>
+      <div id="hint">click to start</div>
+    </div>
+  </div>
+</div>
+<div id="status">loading…</div>
+
+<script>
+  const canvas = document.getElementById('canvas');
+  const veil = document.getElementById('veil');
+  const status = document.getElementById('status');
+
+  const setStatus = (text, isError) => {
+    status.textContent = text;
+    status.classList.toggle('error', !!isError);
+  };
+
+  // Emscripten looks for this global.
+  var Module = {
+    canvas,
+    print: (text) => console.log(text),
+    printErr: (text) => {
+      console.error(text);
+      setStatus(text, true);
+    },
+    setStatus: (text) => setStatus(text || 'running'),
+    onRuntimeInitialized: () => setStatus('running'),
+  };
+
+  window.onerror = (message) => setStatus('error: ' + message, true);
+
+  // Browsers block audio until the user interacts, so the module is not
+  // started until the veil is clicked. Keyboard focus goes to the canvas at
+  // the same time, or key input would go to the page instead.
+  let started = false;
+  const start = () => {
+    if (started) return;
+    started = true;
+    veil.classList.add('hidden');
+    canvas.focus();
+    const script = document.createElement('script');
+    script.src = 'REPLACE_WITH_MODULE_JS';
+    document.body.appendChild(script);
+  };
+  veil.addEventListener('click', start);
+  veil.addEventListener('keydown', start);
+
+  // --- development reload -------------------------------------------------
+  // tools/web_dev.py increments /build-id after each successful rebuild.
+  // Polling rather than a WebSocket: ten lines instead of a dependency, and
+  // the rebuild itself dwarfs the poll interval. Absent in production, where
+  // the endpoint simply 404s and this quietly stops.
+  (async () => {
+    let known = null;
+    for (;;) {
+      try {
+        const response = await fetch('/build-id', { cache: 'no-store' });
+        if (!response.ok) return;
+        const id = (await response.text()).trim();
+        if (known === null) {
+          known = id;
+        } else if (id !== known) {
+          setStatus('rebuilt — reloading');
+          // Hand the running module a chance to snapshot its world first;
+          // see plan/11-web-dev-loop.md (tier 2).
+          if (window.myeSnapshot) {
+            try { window.myeSnapshot(); } catch (e) { console.warn(e); }
+          }
+          location.reload();
+          return;
+        }
+      } catch (e) {
+        return; // not served by the dev server
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  })();
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
