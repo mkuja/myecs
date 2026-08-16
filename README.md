@@ -77,6 +77,7 @@ the browser when a source file changes:
 ```sh
 source ~/emsdk/emsdk_env.sh                 # once per shell
 tools/web_dev.py --example 02_asteroids     # http://localhost:8080
+tools/web_dev.py --target mygame            # any target, in or out of examples/
 ```
 
 Editing any `.c` or `.h` rebuilds (~2 s) and reloads the page. The build is

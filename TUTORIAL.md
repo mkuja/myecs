@@ -1495,6 +1495,23 @@ python3 tools/web_dev.py --example 06_tutorial --port 8080
 Edit any `.c` or `.h` and save: rebuild takes about 2 seconds and the page
 reloads itself.
 
+Nothing about this is tied to `examples/`. `--example` is shorthand for the
+`example_<name>` targets; your own game takes `--target` instead, and needs
+only one line in its `CMakeLists.txt`:
+
+```cmake
+add_executable(mygame main.c)
+target_link_libraries(mygame PRIVATE mye_flags engine)
+
+if(EMSCRIPTEN)
+    mye_web_configure(mygame)   # shell page, ASYNCIFY, growable heap
+endif()
+```
+
+`python3 tools/web_dev.py --target mygame` then finds the page wherever CMake
+put it and watches every source in the repository, so a game three directories
+deep hot-reloads exactly like an example.
+
 Two decisions worth knowing about:
 
 - **ASYNCIFY**, so `while (mye_running(world))` works unchanged. The browser

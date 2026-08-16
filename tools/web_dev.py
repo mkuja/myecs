@@ -3,6 +3,11 @@
 
     tools/web_dev.py                        # asteroids on :8080
     tools/web_dev.py --example 05_showcase --port 9000
+    tools/web_dev.py --target mygame        # any CMake target, anywhere
+
+Nothing here is specific to examples/. --target takes a CMake target name;
+--example is shorthand for the example_<name> targets. A game living outside
+examples/ needs only mye_web_configure(<target>) in its CMakeLists.
 
 Cross-platform by construction: nothing here uses inotify, fswatch or any
 other platform API. Python ships with emscripten, so it costs no dependency.
@@ -22,14 +27,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BUILD_DIR = ROOT / "build" / "web"
 
-# Directories whose C sources trigger a rebuild.
-WATCHED = ["engine", "examples", "web"]
+# Source suffixes whose modification triggers a rebuild.
 WATCHED_SUFFIXES = {".c", ".h", ".html", ".glsl"}
+
+# Skipped when scanning for changes: build output churns during a build (and
+# would rebuild forever), and the rest holds no sources.
+UNWATCHED_DIRS = {"build", ".git", ".cache", "assets", "node_modules"}
 
 # Incremented after every successful rebuild; the page polls it and reloads.
 build_id = 0
 build_lock = threading.Lock()
 last_error = ""
+
+# Set once a build has produced a page; requests are served from here.
+serve_dir = BUILD_DIR
 
 
 def log(message: str) -> None:
@@ -63,17 +74,37 @@ def source_fingerprint() -> dict:
     platform.
     """
     stamps = {}
-    for directory in WATCHED:
-        base = ROOT / directory
-        if not base.is_dir():
+    stack = [ROOT]
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
             continue
-        for path in base.rglob("*"):
-            if path.suffix in WATCHED_SUFFIXES:
+        for path in entries:
+            if path.is_dir():
+                if path.name in UNWATCHED_DIRS or path.name.startswith("."):
+                    continue
+                stack.append(path)
+            elif path.suffix in WATCHED_SUFFIXES:
                 try:
                     stamps[str(path)] = path.stat().st_mtime
                 except OSError:
                     pass
     return stamps
+
+
+def find_page(target: str) -> Path | None:
+    """The directory holding <target>.html.
+
+    Asked of the build tree rather than assumed: emscripten writes the page
+    beside the target's other output, which is wherever in the tree the
+    target's CMakeLists lives. Searching keeps this working for a game in
+    examples/, in game/, or nested three deep, with nothing to configure.
+    """
+    for path in BUILD_DIR.rglob(f"{target}.html"):
+        return path.parent
+    return None
 
 
 def configure(example: str) -> bool:
@@ -89,10 +120,9 @@ def configure(example: str) -> bool:
     return True
 
 
-def build(example: str) -> bool:
-    global build_id, last_error
+def build(target: str) -> bool:
+    global build_id, last_error, serve_dir
 
-    target = f"example_{example}"
     started = time.monotonic()
     result = subprocess.run(
         ["cmake", "--build", str(BUILD_DIR), "--target", target,
@@ -108,15 +138,18 @@ def build(example: str) -> bool:
         return False
 
     elapsed = time.monotonic() - started
+    found = find_page(target)
     with build_lock:
         build_id += 1
         current = build_id
+        if found is not None:
+            serve_dir = found
     last_error = ""
     log(f"rebuilt in {elapsed:.1f}s (build {current}) -- browser will reload")
     return True
 
 
-def watch(example: str) -> None:
+def watch(target: str) -> None:
     known = source_fingerprint()
     while True:
         time.sleep(0.3)
@@ -126,14 +159,18 @@ def watch(example: str) -> None:
                        if known.get(p) != current.get(p)]
             log(f"changed: {', '.join(sorted(set(changed))[:4])}")
             known = current
-            build(example)
+            build(target)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     """Static files, plus the build-id endpoint the page polls."""
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(BUILD_DIR / "examples"), **kwargs)
+        # Read per request rather than captured once: the first successful
+        # build may land after the server is already up.
+        with build_lock:
+            directory = str(serve_dir)
+        super().__init__(*args, directory=directory, **kwargs)
 
     def do_GET(self):  # noqa: N802 - name fixed by the base class
         if self.path.startswith("/build-id"):
@@ -163,23 +200,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--example", default="02_asteroids",
-                        help="example directory name, e.g. 05_showcase")
+    parser.add_argument("--target",
+                        help="CMake target name, e.g. mygame")
+    parser.add_argument("--example",
+                        help="shorthand for the target example_<name>, "
+                             "e.g. 05_showcase")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-watch", action="store_true",
                         help="serve without rebuilding on change")
     args = parser.parse_args()
 
-    if not configure(args.example):
+    if args.target and args.example:
+        parser.error("--target and --example name the same thing; pass one")
+    target = args.target or f"example_{args.example or '02_asteroids'}"
+
+    if not configure(target):
         return 1
-    if not build(args.example):
+    if not build(target):
         log("initial build failed; fix the errors and save to retry")
 
-    if not args.no_watch:
-        threading.Thread(target=watch, args=(args.example,),
-                         daemon=True).start()
+    if find_page(target) is None:
+        log(f"no {target}.html anywhere in {BUILD_DIR}.")
+        log("is the target defined, and does its CMakeLists call "
+            "mye_web_configure()?")
+        return 1
 
-    url = f"http://localhost:{args.port}/example_{args.example}.html"
+    if not args.no_watch:
+        threading.Thread(target=watch, args=(target,), daemon=True).start()
+
+    url = f"http://localhost:{args.port}/{target}.html"
     log(f"serving {url}")
     log("edit any .c or .h file to rebuild and reload; Ctrl-C to stop")
 

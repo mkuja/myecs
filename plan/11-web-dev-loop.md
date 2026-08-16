@@ -245,6 +245,7 @@ cmake --build build/web -j
 
 # develop: builds, serves, watches, reloads
 python3 tools/web_dev.py --example 02_asteroids --port 8080
+python3 tools/web_dev.py --target mygame                    # any CMake target
 
 # one-shot run with stdout piped to the terminal
 emrun --port 8080 build/web/examples/example_02_asteroids.html
