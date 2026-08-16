@@ -107,6 +107,11 @@ mye_model mye_model_from_mesh(ecs_world_t *world, const char *name, Mesh mesh,
                               Color tint);
 
 const Model *mye_model_get(const ecs_world_t *world, mye_model handle);
+
+/* Skeletal animations that came with the model, if any. glTF and IQM carry
+ * them; OBJ does not. Returns NULL and sets count to 0 when there are none. */
+const ModelAnimation *mye_model_animations(const ecs_world_t *world,
+                                           mye_model handle, int *out_count);
 void mye_model_release(ecs_world_t *world, mye_model handle);
 bool mye_model_valid(const ecs_world_t *world, mye_model handle);
 

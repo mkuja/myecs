@@ -17,3 +17,6 @@ target_link_libraries(example_03_scene3d PRIVATE mye_flags engine)
 
 add_executable(example_04_stress 04_stress/main.c)
 target_link_libraries(example_04_stress PRIVATE mye_flags engine)
+
+add_executable(example_05_showcase 05_showcase/main.c)
+target_link_libraries(example_05_showcase PRIVATE mye_flags engine)

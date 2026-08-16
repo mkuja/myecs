@@ -48,7 +48,7 @@ if [[ "$quick" != "--quick" ]]; then
 
     step "Examples (bounded runs, leak-checked on exit)"
     for example in example_00_hello example_01_bounce example_02_asteroids \
-                   example_03_scene3d; do
+                   example_03_scene3d example_05_showcase; do
         binary="build/debug/examples/$example"
         [[ -x "$binary" ]] || continue
         if MYE_MAX_FRAMES=120 "$binary" > /dev/null 2>&1; then

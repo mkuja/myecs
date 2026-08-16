@@ -16,6 +16,21 @@
 
 #include <raylib.h>
 
+/* Plays one of a model's skeletal animations.
+ *
+ * IMPORTANT LIMITATION: raylib stores the animated pose *in the Model*, not
+ * per instance, so two entities sharing one model handle cannot hold
+ * different poses -- the last one to update wins. Give each animated entity
+ * its own model handle until that changes. Static instances of the same model
+ * are unaffected and still share freely. */
+typedef struct MyeModelAnimator {
+    int animation;   /* index into the model's animation array */
+    float frame;     /* current frame; fractional -- raylib interpolates */
+    float speed;     /* frames per second; 24 is a common glTF default */
+    bool loop;
+    bool playing;
+} MyeModelAnimator;
+
 /* A model drawn at the entity's world transform. */
 typedef struct MyeMeshInstance {
     mye_model model;
@@ -45,9 +60,16 @@ typedef struct MyeRender3dConfig {
     bool draw_grid;  /* debug ground grid */
     int grid_slices;
     float grid_spacing;
+
+    /* Use the physically-based shader rather than Blinn-Phong. PBR reads the
+     * metallic/roughness/normal/emissive maps that glTF files actually carry,
+     * so downloaded models look as their author intended. Blinn-Phong ignores
+     * all of it and is cheaper. */
+    bool use_pbr;
 } MyeRender3dConfig;
 
 extern ECS_COMPONENT_DECLARE(MyeMeshInstance);
+extern ECS_COMPONENT_DECLARE(MyeModelAnimator);
 extern ECS_COMPONENT_DECLARE(MyeCamera3D);
 extern ECS_COMPONENT_DECLARE(MyeLight);
 extern ECS_COMPONENT_DECLARE(MyeRender3dConfig);

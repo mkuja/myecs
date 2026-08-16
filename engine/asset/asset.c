@@ -2,6 +2,7 @@
 
 #include "core/channel.h"
 #include "core/jobs.h"
+#include "core/rl_alloc.h"
 
 #include <stdatomic.h>
 #include <string.h>
@@ -55,6 +56,9 @@ typedef struct model_slot {
     uint32_t scope; /* which scene loaded it; 0 = unscoped */
     char key[MYE_ASSET_KEY_MAX];
     Model model;
+    /* Loaded alongside the model when the format carries them. */
+    ModelAnimation *animations;
+    int animation_count;
 } model_slot;
 
 typedef struct sound_slot {
@@ -307,6 +311,30 @@ void mye_texture_release(ecs_world_t *world, mye_texture handle)
 
 /* ---------------------------------------------------------------- models -- */
 
+/* raylib 6.0's UnloadModel frees skeleton.bones and skeleton.bindPose but
+ * NOT model.currentPose or model.boneMatrices, which LoadGLTF allocates for
+ * every rigged model (rmodels.c ~6322). Every animated model therefore leaks
+ * both -- invisible without a tracking allocator, which is how this surfaced.
+ *
+ * Freed here and nulled first, so if a later raylib fixes the oversight its
+ * own free sees NULL and does nothing.
+ *
+ * mye_rl_free, not RL_FREE: raylib.h is included before core/rl_alloc.h in
+ * this file, so the RL_FREE macro is raylib's plain free() and would be
+ * handed a pointer our header-prefixed allocator produced. */
+static void unload_model_fully(Model *model)
+{
+    if (model->currentPose != NULL) {
+        mye_rl_free(model->currentPose);
+        model->currentPose = NULL;
+    }
+    if (model->boneMatrices != NULL) {
+        mye_rl_free(model->boneMatrices);
+        model->boneMatrices = NULL;
+    }
+    UnloadModel(*model);
+}
+
 static model_slot *resolve_model(const mye_asset_db *db, mye_model handle)
 {
     if (db == NULL || handle.generation == 0 ||
@@ -345,6 +373,8 @@ static mye_model claim_model_slot(mye_asset_db *db, const char *key,
     slot->refcount = 1;
     slot->scope = db->scope;
     slot->model = model;
+    slot->animations = NULL;
+    slot->animation_count = 0;
     copy_key(slot->key, key);
 
     return (mye_model){ .index = (uint32_t)index,
@@ -390,7 +420,25 @@ mye_model mye_model_load(ecs_world_t *world, const char *path)
     if (model.meshCount == 0) {
         return (mye_model){ 0 };
     }
-    return claim_model_slot(db, key, model);
+
+    mye_model handle = claim_model_slot(db, key, model);
+    if (handle.generation == 0) {
+        return handle;
+    }
+
+    /* Animations ride along with the model: they are useless without the
+     * skeleton they drive, and share its lifetime. */
+    int animation_count = 0;
+    ModelAnimation *animations = LoadModelAnimations(path, &animation_count);
+    if (animations != NULL && animation_count > 0) {
+        model_slot *slot = &db->models[handle.index];
+        slot->animations = animations;
+        slot->animation_count = animation_count;
+    } else if (animations != NULL) {
+        UnloadModelAnimations(animations, 0);
+    }
+
+    return handle;
 }
 
 mye_model mye_model_from_mesh(ecs_world_t *world, const char *name, Mesh mesh,
@@ -426,6 +474,22 @@ mye_model mye_model_from_mesh(ecs_world_t *world, const char *name, Mesh mesh,
     return claim_model_slot(db, key, model);
 }
 
+const ModelAnimation *mye_model_animations(const ecs_world_t *world,
+                                           mye_model handle, int *out_count)
+{
+    const model_slot *slot = resolve_model(db_get(world), handle);
+    if (slot == NULL || slot->animation_count == 0) {
+        if (out_count != NULL) {
+            *out_count = 0;
+        }
+        return NULL;
+    }
+    if (out_count != NULL) {
+        *out_count = slot->animation_count;
+    }
+    return slot->animations;
+}
+
 const Model *mye_model_get(const ecs_world_t *world, mye_model handle)
 {
     const model_slot *slot = resolve_model(db_get(world), handle);
@@ -444,9 +508,16 @@ void mye_model_release(ecs_world_t *world, mye_model handle)
     if (slot == NULL || --slot->refcount > 0) {
         return;
     }
-    if (!db->headless && slot->model.meshCount > 0) {
-        UnloadModel(slot->model);
+    if (!db->headless) {
+        if (slot->animations != NULL) {
+            UnloadModelAnimations(slot->animations, slot->animation_count);
+        }
+        if (slot->model.meshCount > 0) {
+            unload_model_fully(&slot->model);
+        }
     }
+    slot->animations = NULL;
+    slot->animation_count = 0;
     slot->state = ASSET_EMPTY;
     slot->key[0] = '\0';
     slot->model = (Model){ 0 };
@@ -893,9 +964,14 @@ static void assets_fini(ecs_world_t *world, void *ctx)
         }
     }
     for (int i = 0; i < MYE_MAX_MODELS; ++i) {
-        if (db->models[i].state == ASSET_LOADED && !db->headless &&
-            db->models[i].model.meshCount > 0) {
-            UnloadModel(db->models[i].model);
+        if (db->models[i].state == ASSET_LOADED && !db->headless) {
+            if (db->models[i].animations != NULL) {
+                UnloadModelAnimations(db->models[i].animations,
+                                      db->models[i].animation_count);
+            }
+            if (db->models[i].model.meshCount > 0) {
+                unload_model_fully(&db->models[i].model);
+            }
         }
     }
     if (db->placeholder_ready) {

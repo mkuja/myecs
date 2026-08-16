@@ -142,11 +142,27 @@ vec3 lit = albedo*(ambientLin + lightAccum); // maths in linear
 finalColor = vec4(pow(lit, vec3(1.0/2.2)), base.a);  // linear -> sRGB
 ```
 
+**PBR is now implemented** alongside Blinn-Phong, selected with
+`MyeRender3dConfig.use_pbr` (default on). Cook-Torrance: GGX distribution,
+Smith geometry, Schlick Fresnel, plus Reinhard tone mapping -- because lights
+only add, and without it a bright scene clips to flat white. It reads the
+metallic-roughness, normal and emissive maps that glTF actually carries, so a
+downloaded model looks as its author intended.
+
+raylib binds material map N to texture slot N and writes that slot into
+`shader.locs[SHADER_LOC_MAP_*]`, so the sampler names are wired up explicitly
+rather than by convention (see `resolve_pbr_uniforms`). glTF packs roughness
+in the green channel and metallic in blue of one texture.
+
+**Skeletal animation is implemented** via `MyeModelAnimator`. raylib 6.0 takes
+a *fractional* frame and interpolates between keyframes. One limitation worth
+knowing: raylib stores the pose **in the Model**, not per instance, so two
+entities sharing a model handle cannot hold different poses.
+
 Not implemented, in rough order of value: **shadows** (shadow mapping, a
-milestone of its own -- everything currently floats), **point/spot lights**
-(position plus distance falloff, about an hour), **normal maps**, and **PBR**
-(metallic/roughness -- note that glTF files carry this data and our shader
-ignores it, so downloaded models will not look as their author intended).
+milestone of its own -- everything still floats), **point/spot lights**
+(position plus distance falloff, about an hour), and **image-based lighting**
+(an environment map, which is what makes PBR metals really sing).
 
 ## What we deliberately postpone
 
