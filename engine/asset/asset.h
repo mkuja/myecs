@@ -98,6 +98,18 @@ bool mye_texture_valid(const ecs_world_t *world, mye_texture handle);
 /* Loads a 3D model. raylib 6.0 handles glTF/GLB, OBJ, IQM, M3D and VOX;
  * glTF is the format to target (see plan/03-rendering.md). Deduped by path
  * and refcounted like textures. */
+/* Resolves a path given relative to the project root, so a program finds its
+ * assets whatever directory it was started from.
+ *
+ * Tries the working directory first, then walks up from the executable's own
+ * directory. Writes the resolved path to `out` and returns true; on failure
+ * copies `relative` through unchanged and returns false, so the caller can
+ * still report the path it wanted.
+ *
+ * Explicit rather than automatic: the engine does not quietly change the
+ * working directory underneath you. */
+bool mye_asset_path(const char *relative, char *out, size_t out_size);
+
 mye_model mye_model_load(ecs_world_t *world, const char *path);
 
 /* Registers a mesh the caller generated (GenMeshCube, GenMeshSphere, ...) as

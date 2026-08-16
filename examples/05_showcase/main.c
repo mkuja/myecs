@@ -140,8 +140,11 @@ static void DrawHud(ecs_iter_t *it)
 
     const MyeRender3dConfig *config = ecs_singleton_get(world,
                                                         MyeRender3dConfig);
-    const MyeModelAnimator *animator = ecs_get(world, state->fox,
-                                               MyeModelAnimator);
+    /* Only once there is a fox: ecs_get on entity 0 aborts inside flecs, so
+     * reading this before the assets_ok check below would crash on exactly
+     * the failure the check exists to report. */
+    const MyeModelAnimator *animator =
+        state->fox != 0 ? ecs_get(world, state->fox, MyeModelAnimator) : NULL;
 
     mye_allocator frame = mye_frame_allocator(world);
     char *line = MYE_NEW_ARRAY(frame, char, 192);
@@ -206,14 +209,30 @@ int main(void)
                                        (Vector3){ 0.0f, 40.0f, 0.0f }, 50.0f);
 
     /* --- the assets ---------------------------------------------------- */
-    mye_model fox = mye_model_load(world, "assets/models/Fox.glb");
-    mye_model boombox = mye_model_load(world, "assets/models/BoomBox.glb");
+    char fox_path[1024];
+    char boombox_path[1024];
+    bool found = mye_asset_path("assets/models/Fox.glb", fox_path,
+                                sizeof fox_path);
+    found &= mye_asset_path("assets/models/BoomBox.glb", boombox_path,
+                            sizeof boombox_path);
+
+    mye_model fox = mye_model_load(world, fox_path);
+    mye_model boombox = mye_model_load(world, boombox_path);
     state->assets_ok = mye_model_valid(world, fox) &&
                        mye_model_valid(world, boombox);
 
     if (!state->assets_ok) {
-        mye_log_error("could not load assets/models/*.glb -- run "
-                      "tools/fetch_sample_assets.sh");
+        /* Say which of the two it is. "Run the fetch script" is wrong advice
+         * when the files are already there, and sends you in a circle. */
+        if (!found) {
+            mye_log_error("assets/models/*.glb not found from here or from "
+                          "%s -- run tools/fetch_sample_assets.sh",
+                          GetApplicationDirectory());
+        } else {
+            mye_log_error("found the .glb files but could not load them; "
+                          "they may be truncated -- delete assets/models and "
+                          "re-run tools/fetch_sample_assets.sh");
+        }
     }
 
     if (state->assets_ok) {

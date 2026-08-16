@@ -5,6 +5,7 @@
 #include "core/rl_alloc.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <string.h>
 
 ECS_COMPONENT_DECLARE(MyeAssets);
@@ -392,6 +393,51 @@ static int find_model_by_key(const mye_asset_db *db, const char *key)
     return -1;
 }
 
+/* Six is arbitrary but ample: build trees put an executable three or four
+ * directories below the root, never dozens. */
+#define MYE_ASSET_SEARCH_DEPTH 6
+
+bool mye_asset_path(const char *relative, char *out, size_t out_size)
+{
+    if (relative == NULL || out == NULL || out_size == 0) {
+        return false;
+    }
+
+    if (FileExists(relative)) {
+        snprintf(out, out_size, "%s", relative);
+        return true;
+    }
+
+    /* Walk up from the executable rather than the working directory: the
+     * point is to be independent of where the program was started. */
+    const char *base = GetApplicationDirectory();
+    if (base == NULL) {
+        snprintf(out, out_size, "%s", relative);
+        return false;
+    }
+
+    char prefix[1024];
+    snprintf(prefix, sizeof prefix, "%s", base);
+
+    for (int level = 0; level < MYE_ASSET_SEARCH_DEPTH; ++level) {
+        char candidate[2048];
+        snprintf(candidate, sizeof candidate, "%s/%s", prefix, relative);
+        if (FileExists(candidate)) {
+            snprintf(out, out_size, "%s", candidate);
+            return true;
+        }
+
+        char *slash = strrchr(prefix, '/');
+        if (slash == NULL || slash == prefix) {
+            break;
+        }
+        *slash = '\0';
+    }
+
+    snprintf(out, out_size, "%s", relative);
+    return false;
+}
+
 mye_model mye_model_load(ecs_world_t *world, const char *path)
 {
     mye_asset_db *db = db_get(world);
@@ -418,11 +464,16 @@ mye_model mye_model_load(ecs_world_t *world, const char *path)
 
     Model model = LoadModel(path);
     if (model.meshCount == 0) {
+        /* A failed load is not an empty one: raylib still allocates a default
+         * material for the model it hands back, so dropping the struct here
+         * leaks it. */
+        UnloadModel(model);
         return (mye_model){ 0 };
     }
 
     mye_model handle = claim_model_slot(db, key, model);
     if (handle.generation == 0) {
+        UnloadModel(model); /* registry full: nobody else will free it */
         return handle;
     }
 

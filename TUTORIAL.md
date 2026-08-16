@@ -515,8 +515,12 @@ int main(void)
     ecs_world_t *world = mye_init(&(mye_config){ .title = "assets" });
     if (world == NULL) return 1;
 
-    /* From a file. */
-    mye_texture from_disk = mye_texture_load(world, "assets/player.png");
+    /* From a file. mye_asset_path makes the lookup independent of the
+     * directory the program was started in -- a relative path alone works
+     * only from the project root. */
+    char path[1024];
+    mye_asset_path("assets/player.png", path, sizeof path);
+    mye_texture from_disk = mye_texture_load(world, path);
 
     /* Generated: the engine takes ownership of the Image and uploads it. */
     Image img = GenImageColor(32, 32, BLANK);
@@ -1147,7 +1151,12 @@ skins the mesh.
 frame counter with looping and speed — because raylib does the skinning.
 
 ```c ctx
-mye_model fox = mye_model_load(world, "assets/models/Fox.glb");
+/* Resolved against the executable as well as the working directory, so the
+ * program finds its assets wherever it was started from. */
+char path[1024];
+mye_asset_path("assets/models/Fox.glb", path, sizeof path);
+
+mye_model fox = mye_model_load(world, path);
 ecs_entity_t e = mye_mesh_spawn(world, fox, (Vector3){ 0, 0, 0 }, WHITE);
 
 ecs_set(world, e, MyeModelAnimator,
