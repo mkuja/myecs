@@ -15,13 +15,37 @@
 
 #include <stdbool.h>
 
-#if defined(_WIN32)
+/* Three backends. Emscripten without -pthread gets a no-op one: browser
+ * threads need SharedArrayBuffer and cross-origin isolation, which is a
+ * deployment constraint rather than a build flag, so the first web build
+ * ships single-threaded.
+ *
+ * Nothing else has to know. mye_jobs_create fails, the asset registry falls
+ * back to synchronous loading, and mye_texture_load_async loads inline --
+ * paths that already existed and are tested (see
+ * disabling_workers_falls_back_to_synchronous). */
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+#define MYE_THREADS_NONE 1
+#define MYE_THREADS_C11 0
+#elif defined(_WIN32)
+#define MYE_THREADS_NONE 0
 #define MYE_THREADS_C11 1
 #else
+#define MYE_THREADS_NONE 0
 #define MYE_THREADS_C11 0
 #endif
 
-#if MYE_THREADS_C11
+#if MYE_THREADS_NONE
+
+/* Placeholders: nothing is ever created, so nothing is ever locked. */
+typedef int mye_thread;
+typedef int mye_mutex;
+typedef int mye_cond;
+
+#define MYE_THREAD_RETURN void *
+#define MYE_THREAD_RESULT NULL
+
+#elif MYE_THREADS_C11
 #include <threads.h>
 
 typedef thrd_t mye_thread;

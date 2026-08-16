@@ -47,6 +47,14 @@ target_compile_definitions(raylib PRIVATE
     SUPPORT_FILEFORMAT_XM=0
     SUPPORT_FILEFORMAT_MOD=0)
 
+# raylib's web backend uses EM_ASM, which clang rejects under -std=c11:
+# "EM_ASM does not work in -std=c* modes, use -std=gnu* modes instead". Grant
+# GNU extensions to raylib alone -- our own targets stay strict ISO C11, the
+# same way -Werror applies only to first-party code.
+if(EMSCRIPTEN)
+    set_target_properties(raylib PROPERTIES C_EXTENSIONS ON)
+endif()
+
 target_link_libraries(raylib PRIVATE mye_alloc)
 set(_mye_rl_alloc_header "${CMAKE_CURRENT_LIST_DIR}/../engine/core/rl_alloc.h")
 target_compile_options(raylib PRIVATE -include "${_mye_rl_alloc_header}")

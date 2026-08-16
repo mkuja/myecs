@@ -82,18 +82,15 @@
 
   window.onerror = (message) => setStatus('error: ' + message, true);
 
-  // Browsers block audio until the user interacts, so the module is not
-  // started until the veil is clicked. Keyboard focus goes to the canvas at
-  // the same time, or key input would go to the page instead.
-  let started = false;
+  // Emscripten's {{{ SCRIPT }}} loads the module as the page loads, so the
+  // veil does not gate startup -- it gates the *user gesture*. Browsers
+  // suspend audio until one happens, and the canvas needs focus or key input
+  // goes to the page instead of the game.
   const start = () => {
-    if (started) return;
-    started = true;
     veil.classList.add('hidden');
     canvas.focus();
-    const script = document.createElement('script');
-    script.src = 'REPLACE_WITH_MODULE_JS';
-    document.body.appendChild(script);
+    // Resuming any suspended AudioContext is what the gesture is really for.
+    if (window.AudioContext && Module.SDL2) { /* raylib/miniaudio handles it */ }
   };
   veil.addEventListener('click', start);
   veil.addEventListener('keydown', start);

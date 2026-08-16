@@ -22,7 +22,7 @@ subsystem API is designed.
 | M5 | 3D scenes | **done** |
 | M6 | Scene system | **done** |
 | M7 | Parallelism & polish | **done** |
-| M8 | Web build (WebAssembly) | next, see [10-web.md](10-web.md) |
+| M8 | Web build (WebAssembly) | **done** (tier-1 reload) |
 
 ## M0 — Hello window (S) ✅
 
@@ -287,7 +287,7 @@ Notes for later:
 - raylib's `GetTime()` returns 0 forever without a window, which silently
   zeroes any headless benchmark. `mye_time_now()` uses `timespec_get`.
 
-## M8 — Web build (WebAssembly) (M)
+## M8 — Web build (WebAssembly) (M) ✅
 
 Full design in [10-web.md](10-web.md). Both foundations already support it:
 raylib has a first-class `Web` platform, flecs compiles under emscripten. The
@@ -296,8 +296,33 @@ frame becomes a callback), shipping single-threaded first (emscripten threads
 need cross-origin isolation), and asset packaging -- which Asteroids does not
 need at all, since it generates its art and audio in code.
 
-Two habits to keep from now on so this stays cheap: never add a second
-blocking loop, and keep every async path working with zero workers.
+**Done**: all five examples compile to WebAssembly, and
+`tools/web_dev.py` serves them with rebuild-and-reload on save (measured:
+2.1 s from touching a `.c` file to a new build id).
+
+The plan's bet paid off exactly as written -- **ASYNCIFY meant zero engine
+and zero example changes**, and the two graceful paths built earlier
+absorbed the rest: `MYE_THREADS_NONE` makes `mye_jobs_create` fail, which
+falls through to synchronous asset loading, which was already tested.
+
+Notes:
+
+- **raylib's web backend needs GNU extensions.** `EM_ASM` is rejected under
+  `-std=c11` ("use -std=gnu* modes instead"). `C_EXTENSIONS ON` is granted to
+  the raylib target alone, so first-party code stays strict ISO C11 -- the
+  same shape as `-Werror` applying only to our targets.
+- **WebGL 2** (`OPENGL_VERSION "ES 3.0"`), not raylib's WebGL 1 default, so
+  the GLSL ES 300 prologue is the only shader difference.
+- Sizes: 1.4-1.7 MB wasm per example, ASYNCIFY included.
+- The dev server sends COOP/COEP already, so enabling pthreads later is a
+  build flag rather than a redeployment.
+
+Still to do (tier 2 of [11-web-dev-loop.md](11-web-dev-loop.md)): snapshot
+the world to JSON before a reload and restore it after, so a rebuild does not
+restart the game. The serializer for it already exists (M6).
+
+Two habits to keep so this stays cheap: never add a second blocking loop, and
+keep every async path working with zero workers.
 
 ## After M8 (Tier 3, unscheduled)
 

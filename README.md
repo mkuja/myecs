@@ -68,6 +68,25 @@ https://www.flecs.dev/explorer/?host=localhost:27750
 and **F3** toggles an on-screen overlay with frame times, memory, asset counts
 and warning totals (`MYE_OVERLAY=1` to start with it open).
 
+## Web build
+
+All examples compile to WebAssembly. One command builds, serves and reloads
+the browser when a source file changes:
+
+```sh
+source ~/emsdk/emsdk_env.sh                 # once per shell
+tools/web_dev.py --example 02_asteroids     # http://localhost:8080
+```
+
+Editing any `.c` or `.h` rebuilds (~2 s) and reloads the page. The build is
+single-threaded and needs no asset packaging, because the examples generate
+their textures and audio in code.
+
+```sh
+emcmake cmake -S . -B build/web -DCMAKE_BUILD_TYPE=Release
+cmake --build build/web -j
+```
+
 ## The shape of a game
 
 ```c

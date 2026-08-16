@@ -33,8 +33,17 @@ target_link_libraries(mye_alloc PRIVATE mye_flags)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/MyeDependencies.cmake")
 
-enable_testing()
+# The web build has no sanitizers, no threads and no test runner: emscripten
+# provides none of them, and the tests are a desktop concern.
+if(EMSCRIPTEN)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/MyeWeb.cmake")
+else()
+    enable_testing()
+endif()
 
 add_subdirectory(engine)
 add_subdirectory(examples)
-add_subdirectory(tests)
+
+if(NOT EMSCRIPTEN)
+    add_subdirectory(tests)
+endif()
