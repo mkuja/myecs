@@ -177,6 +177,30 @@ Vendored by raylib: M3D model loading.
  *  stb_image - v2.13 - public domain image loader - http://nothings.org/stb_image.h
 ```
 
+## Sample assets
+
+Not part of the source tree -- `assets/` is gitignored and populated by
+`tools/fetch_sample_assets.sh` from the Khronos glTF-Sample-Assets
+repository. They are used by `examples/05_showcase` and the render tests.
+Anything that redistributes these files carries the obligations below.
+
+### BoomBox.glb
+
+Everything: **CC0-1.0** (public domain), Microsoft, 2017. No attribution
+required.
+
+### Fox.glb
+
+Three contributions, two licences -- **attribution is required**:
+
+| Part | Licence | Credit |
+|---|---|---|
+| Model | CC0-1.0 | PixelMannen, 2014 |
+| Rigging & animation | **CC-BY-4.0** | tomkranis, 2014 |
+| Conversion to glTF | **CC-BY-4.0** | @AsoboStudio and @scurest, 2017 |
+
+CC-BY-4.0: <https://creativecommons.org/licenses/by/4.0/legalcode>
+
 ## Deliberately excluded
 
 `jar_xm` and `jar_mod` (XM/MOD tracker music, WTFPL) ship with raylib but are
