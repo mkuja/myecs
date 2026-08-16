@@ -28,8 +28,33 @@ set(MYE_WEB_SHELL "${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html")
 #                a deployment constraint. The engine already degrades
 #                gracefully: MYE_THREADS_NONE makes mye_jobs_create fail, and
 #                asset loading falls back to synchronous.
+#  PRELOAD <dir>...
+#                packages a directory into the module's virtual filesystem.
+#                A web build has no access to the host disk: unless a file is
+#                packaged at link time it does not exist at runtime, and no
+#                amount of path resolution will find it. Directories are
+#                mounted at the same relative path they have in the project,
+#                so the same "assets/models/Fox.glb" works on both targets.
 function(mye_web_configure target)
+    cmake_parse_arguments(ARG "" "" "PRELOAD" ${ARGN})
+
+    set(preload_options "")
+    foreach(dir IN LISTS ARG_PRELOAD)
+        if(EXISTS "${CMAKE_SOURCE_DIR}/${dir}")
+            list(APPEND preload_options
+                 "--preload-file" "${CMAKE_SOURCE_DIR}/${dir}@/${dir}")
+        else()
+            # Not fatal: the examples degrade to a message on screen, and
+            # sample assets are an optional download.
+            message(WARNING
+                "${target}: ${dir} does not exist, so it will not be packaged "
+                "into the web build -- run tools/fetch_sample_assets.sh and "
+                "re-configure if you want it")
+        endif()
+    endforeach()
+
     target_link_options(${target} PRIVATE
+        ${preload_options}
         --shell-file "${MYE_WEB_SHELL}"
         -sASYNCIFY
         -sALLOW_MEMORY_GROWTH=1

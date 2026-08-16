@@ -29,8 +29,12 @@ target_link_libraries(example_06_tutorial PRIVATE mye_flags engine)
 if(EMSCRIPTEN)
     foreach(target
             example_00_hello example_01_bounce example_02_asteroids
-            example_03_scene3d example_04_stress example_05_showcase
+            example_03_scene3d example_04_stress
             example_06_tutorial)
         mye_web_configure(${target})
     endforeach()
+
+    # The only example that reads files from disk, so the only one that needs
+    # anything packaged into the virtual filesystem.
+    mye_web_configure(example_05_showcase PRELOAD assets/models)
 endif()
