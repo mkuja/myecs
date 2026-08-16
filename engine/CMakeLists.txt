@@ -2,6 +2,8 @@ add_library(engine STATIC
     core/channel.c
     core/thread.c
     core/jobs.c
+    core/log.c
+    debug/overlay.c
     core/engine.c
     input/input.c
     asset/asset.c

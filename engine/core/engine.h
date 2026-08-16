@@ -4,6 +4,7 @@
 #define MYE_CORE_ENGINE_H
 
 #include "core/alloc.h"
+#include "core/log.h"
 
 #include <flecs.h>
 
@@ -123,6 +124,17 @@ typedef struct mye_config {
     /* No window, no OpenGL, no audio device -- for headless tests. The ECS
      * world and every non-rendering system still run normally. */
     bool headless;
+
+    /* Starts flecs' REST server, which serves the world to the flecs
+     * Explorer: a live view of every entity, component value, system and
+     * query in the running game, editable while it runs.
+     *
+     *   https://www.flecs.dev/explorer/?host=localhost:27750
+     *
+     * Debug builds default this on; Release ignores it -- a shipped game
+     * should not run an HTTP server. Override with MYE_EXPLORER=0 or 1. */
+    bool explorer;
+    uint16_t explorer_port; /* default 27750 */
 
     /* Stop after this many frames (0 = run until the window closes). The
      * MYE_MAX_FRAMES environment variable overrides this, which lets any

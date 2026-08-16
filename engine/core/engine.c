@@ -1,5 +1,8 @@
 #include "core/engine.h"
 
+#include "core/log.h"
+#include "debug/overlay.h"
+
 #include "asset/asset.h"
 #include "audio/audio.h"
 #include "input/input.h"
@@ -170,6 +173,22 @@ ecs_world_t *mye_init(const mye_config *config)
     if (cfg.fixed_dt <= 0.0f) cfg.fixed_dt = 1.0f / 60.0f;
     if (cfg.max_steps_per_frame <= 0) cfg.max_steps_per_frame = 5;
     if (cfg.asset_workers == 0) cfg.asset_workers = 2;
+    if (cfg.explorer_port == 0) cfg.explorer_port = 27750;
+
+    /* On by default in debug builds only: an HTTP server has no business in
+     * a shipped game. */
+#if defined(MYE_DEBUG)
+    bool explorer = true;
+#else
+    bool explorer = false;
+#endif
+    if (cfg.explorer) {
+        explorer = true;
+    }
+    const char *explorer_env = getenv("MYE_EXPLORER");
+    if (explorer_env != NULL) {
+        explorer = explorer_env[0] == '1';
+    }
 
     mye_allocator base = mye_allocator_valid(cfg.allocator)
                              ? cfg.allocator
@@ -213,6 +232,8 @@ ecs_world_t *mye_init(const mye_config *config)
     }
 
     install_flecs_os_api(engine->allocator);
+    /* After the os api is set, since installing hooks reads and rewrites it. */
+    mye_log_install_hooks();
     mye_rl_alloc_set(engine->allocator);
 
     ecs_world_t *world = ecs_init();
@@ -251,6 +272,14 @@ ecs_world_t *mye_init(const mye_config *config)
         ecs_set_threads(world, cfg.worker_threads);
     }
 
+    /* Serve the world to the flecs Explorer. Headless worlds get it too --
+     * inspecting a test run is exactly when it is most useful. */
+    if (explorer) {
+        ecs_singleton_set(world, EcsRest, { .port = cfg.explorer_port });
+        mye_log_info("explorer: https://www.flecs.dev/explorer/?host=localhost:%u",
+                     (unsigned)cfg.explorer_port);
+    }
+
     ECS_IMPORT(world, MyeInputModule);
     ECS_IMPORT(world, MyeAssetsModule);
     ECS_IMPORT(world, MyeAudioModule);
@@ -259,6 +288,7 @@ ecs_world_t *mye_init(const mye_config *config)
     ECS_IMPORT(world, MyeSceneModule);
     mye_serialize_register_engine_components(world);
     ECS_IMPORT(world, MyeRender3dModule);
+    ECS_IMPORT(world, MyeDebugOverlayModule);
 
     return world;
 }
