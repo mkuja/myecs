@@ -64,6 +64,15 @@ typedef struct MyeSpriteAnim {
  * a discrepancy with no visible cause. The engine should not diverge data
  * from pixels behind your back.
  *
+ * Composes through the transform hierarchy: an entity with a parent blends
+ * its own local offset, and the chain is multiplied together into
+ * MyeRenderTransform at draw time, so a child stays rigidly attached to an
+ * interpolated parent. Blending each link separately is what keeps the rate
+ * right -- prev_x/prev_y are one fixed STEP back, while transforms compose
+ * once per FRAME, and a frame can run several steps or none.
+ *
+ * 2D only: a 3D entity is drawn at its un-blended world transform.
+ *
  * The previous position is maintained by the engine; do not write it. Call
  * mye_transform_snap() after teleporting an entity, or the blend will smear
  * it across the screen -- a screen wrap from x=1270 to x=10 draws a streak

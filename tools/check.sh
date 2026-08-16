@@ -46,6 +46,9 @@ if [[ "$quick" != "--quick" ]]; then
     run_config "ThreadSanitizer" build/tsan "-LE render" \
         -DCMAKE_BUILD_TYPE=Debug -DMYE_SANITIZE_THREAD=ON
 
+    step "TUTORIAL.md code blocks"
+    python3 tools/check_tutorial.py || fail "tutorial code blocks"
+
     step "Examples (bounded runs, leak-checked on exit)"
     for example in example_00_hello example_01_bounce example_02_asteroids \
                    example_03_scene3d example_05_showcase example_06_tutorial; do

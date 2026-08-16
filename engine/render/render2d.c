@@ -1,5 +1,9 @@
 #include "render/render2d.h"
 
+#include "core/log.h"
+
+#include <raymath.h>
+
 #include <stdlib.h>
 
 ECS_COMPONENT_DECLARE(MyeSprite);
@@ -132,8 +136,8 @@ static void MyeRenderSprites(ecs_iter_t *it)
         const MyeRotation2D *rotations = ecs_field(&iter, MyeRotation2D, 2);
         const MyeScale2D *scales = ecs_field(&iter, MyeScale2D, 3);
         const MyeInterpolate *interp = ecs_field(&iter, MyeInterpolate, 4);
-        const MyeWorldTransform *world_tf =
-            ecs_field(&iter, MyeWorldTransform, 5);
+        const MyeRenderTransform *render_tf =
+            ecs_field(&iter, MyeRenderTransform, 5);
 
         for (int i = 0; i < iter.count && count < total; ++i) {
             const Texture2D *texture =
@@ -152,32 +156,28 @@ static void MyeRenderSprites(ecs_iter_t *it)
             float sy = scales != NULL ? scales[i].y : 1.0f;
             float angle = rotations != NULL ? rotations[i].angle : 0.0f;
 
-            /* Blend between the last two simulated positions if this entity
-             * opted in. The result stays local to the draw list: it is never
-             * written back, so nothing else can mistake it for the
-             * simulation's position. */
             /* Where to draw, in order of precedence:
-             *   1. blended between the last two fixed steps, if opted in;
-             *   2. the world transform, if the entity is in a hierarchy --
-             *      a child's MyePosition2D is only its offset from its
-             *      parent, so drawing that directly would put it near the
-             *      origin;
+             *   1. the render transform, if the entity is in a hierarchy --
+             *      it already carries the blend for this entity and every
+             *      parent above it;
+             *   2. its own blend, for an interpolated entity with no
+             *      hierarchy to compose;
              *   3. its plain position.
              *
-             * Interpolation wins over the hierarchy because the two do not
-             * combine yet: an interpolated child would need its parent's
-             * previous transform too. */
+             * None of this is written back: the draw list is the only place
+             * a blended position exists, so nothing can mistake it for the
+             * simulation's. */
             float draw_x = positions[i].x;
             float draw_y = positions[i].y;
-            if (interp != NULL && !interp[i].snap) {
+            if (render_tf != NULL) {
+                Vector3 p = mye_matrix_translation(render_tf[i].m);
+                draw_x = p.x;
+                draw_y = p.y;
+            } else if (interp != NULL && !interp[i].snap) {
                 draw_x = interp[i].prev_x +
                          (positions[i].x - interp[i].prev_x) * alpha;
                 draw_y = interp[i].prev_y +
                          (positions[i].y - interp[i].prev_y) * alpha;
-            } else if (world_tf != NULL) {
-                Vector3 world_pos = mye_matrix_translation(world_tf[i].m);
-                draw_x = world_pos.x;
-                draw_y = world_pos.y;
             }
 
             items[count++] = (draw_item){
@@ -228,6 +228,97 @@ static void MyeCapturePrevPositions(ecs_iter_t *it)
         interp[i].prev_x = pos[i].x;
         interp[i].prev_y = pos[i].y;
         interp[i].snap = false;
+    }
+}
+
+/* Composes the drawn transform chain: each link contributes its own motion
+ * blended between the last two fixed steps, then multiplies through its
+ * parent's already-blended transform.
+ *
+ * Blending each link separately, rather than blending the finished world
+ * transform, is what keeps the rate right: MyeInterpolate records where an
+ * entity was one fixed STEP ago, while transforms are composed once per
+ * FRAME. A frame that runs two steps -- or none -- would otherwise blend
+ * across the wrong interval and draw the entity at the wrong place and the
+ * wrong speed.
+ *
+ * Interpolation only ever moves an entity, so the blended local transform is
+ * the raw one with its translation replaced; rotation and scale carry over
+ * untouched. Runs in EcsPreStore: after propagation has produced this
+ * frame's world transforms, before anything draws. */
+static void MyeBlendRenderTransforms(ecs_iter_t *it)
+{
+    const MyeLocalTransform *local = ecs_field(it, MyeLocalTransform, 0);
+    MyeRenderTransform *render = ecs_field(it, MyeRenderTransform, 1);
+    const MyeInterpolate *interp = ecs_field(it, MyeInterpolate, 2);
+    const MyePosition2D *pos = ecs_field(it, MyePosition2D, 3);
+    const MyeRenderTransform *parent = ecs_field(it, MyeRenderTransform, 4);
+
+    const MyeTime *time = ecs_singleton_get(it->world, MyeTime);
+    float alpha = time != NULL ? time->alpha : 0.0f;
+
+    for (int i = 0; i < it->count; ++i) {
+        Matrix blended = local[i].m;
+
+        if (interp != NULL && pos != NULL && !interp[i].snap) {
+            blended.m12 = interp[i].prev_x +
+                          (pos[i].x - interp[i].prev_x) * alpha;
+            blended.m13 = interp[i].prev_y +
+                          (pos[i].y - interp[i].prev_y) * alpha;
+        }
+
+        /* One shared value for the table, not an array: the parent term
+         * reads from the parent entity. */
+        render[i].m = parent != NULL ? MatrixMultiply(blended, parent->m)
+                                     : blended;
+    }
+}
+
+/* Tag: this entity has already been warned about, so a sprite that is set
+ * every frame (a tint change, a scene reload) does not warn every frame. */
+typedef struct MyeTransformWarned {
+    char unused;
+} MyeTransformWarned;
+
+ECS_COMPONENT_DECLARE(MyeTransformWarned);
+
+/* A sprite parented to something, but without the transform components the
+ * hierarchy runs on, is a silent misplacement: MyePosition2D is then read as
+ * a world position when it was authored as an offset, so the sprite draws
+ * near the origin instead of on its parent.
+ *
+ * Reached from two directions, because either order is natural: setting the
+ * sprite on an entity that is already a child, or -- as mye_sprite_spawn
+ * encourages -- parenting an entity that already has its sprite. */
+static void MyeWarnParentedWithoutTransform(ecs_iter_t *it)
+{
+    ecs_world_t *world = it->world;
+
+    for (int i = 0; i < it->count; ++i) {
+        ecs_entity_t e = it->entities[i];
+
+        if (!ecs_has(world, e, MyeSprite)) {
+            continue;
+        }
+        if (ecs_get_target(world, e, EcsChildOf, 0) == 0) {
+            continue; /* a root: its position IS its world position */
+        }
+        if (ecs_has(world, e, MyeWorldTransform)) {
+            continue; /* takes part in the hierarchy; nothing to warn about */
+        }
+        if (ecs_has(world, e, MyeTransformWarned)) {
+            continue;
+        }
+
+        const char *name = ecs_get_name(world, e);
+        mye_log_warn(
+            "sprite '%s' has a parent but no MyeLocalTransform/"
+            "MyeWorldTransform, so its MyePosition2D will be drawn as a world "
+            "position rather than as an offset from its parent -- it will "
+            "appear near the origin. Add both components (or use "
+            "mye_spawn_3d) to place it relative to its parent.",
+            name != NULL ? name : "<unnamed>");
+        ecs_add(world, e, MyeTransformWarned);
     }
 }
 
@@ -406,8 +497,8 @@ void MyeRender2dModuleImport(ecs_world_t *world)
             { .id = ecs_id(MyeInterpolate), .inout = EcsIn,
               .oper = EcsOptional },
             /* Present when the entity takes part in the transform hierarchy;
-             * for a child, this is where the parent has actually put it. */
-            { .id = ecs_id(MyeWorldTransform), .inout = EcsIn,
+             * this is where the blended parent chain has actually put it. */
+            { .id = ecs_id(MyeRenderTransform), .inout = EcsIn,
               .oper = EcsOptional },
             { .id = ecs_id(MyeHidden), .oper = EcsNot },
         },
@@ -430,6 +521,42 @@ void MyeRender2dModuleImport(ecs_world_t *world)
             { .id = ecs_id(MyePosition2D), .inout = EcsIn },
         },
         .callback = MyeCapturePrevPositions,
+    });
+
+    ecs_system(world, {
+        .entity = ecs_entity(world, { .name = "MyeBlendRenderTransforms",
+                                      .add = ecs_ids(ecs_dependson(
+                                          EcsPreStore)) }),
+        .query.terms = {
+            { .id = ecs_id(MyeLocalTransform), .inout = EcsIn },
+            { .id = ecs_id(MyeRenderTransform), .inout = EcsOut },
+            { .id = ecs_id(MyeInterpolate), .inout = EcsIn,
+              .oper = EcsOptional },
+            { .id = ecs_id(MyePosition2D), .inout = EcsIn,
+              .oper = EcsOptional },
+            /* Parent's blended transform, breadth-first so it is final
+             * before any child reads it. Optional: roots have no parent. */
+            { .id = ecs_id(MyeRenderTransform),
+              .inout = EcsIn,
+              .oper = EcsOptional,
+              .src.id = EcsCascade,
+              .trav = EcsChildOf },
+        },
+        .callback = MyeBlendRenderTransforms,
+    });
+
+    ECS_COMPONENT_DEFINE(world, MyeTransformWarned);
+
+    ecs_observer(world, {
+        .query.terms = {{ .id = ecs_id(MyeSprite) }},
+        .events = { EcsOnSet },
+        .callback = MyeWarnParentedWithoutTransform,
+    });
+
+    ecs_observer(world, {
+        .query.terms = {{ .id = ecs_pair(EcsChildOf, EcsWildcard) }},
+        .events = { EcsOnAdd },
+        .callback = MyeWarnParentedWithoutTransform,
     });
 
     /* Animation is simulation, not drawing: it runs headless too, so tests

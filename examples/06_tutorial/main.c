@@ -173,10 +173,20 @@ static void MineDrift(ecs_iter_t *it)
         pos[i].x += vel[i].x * dt;
         pos[i].y += vel[i].y * dt;
 
-        if (pos[i].x < 0 || pos[i].x > SCREEN_W) pos[i].x = pos[i].x < 0 ? SCREEN_W : 0;
-        if (pos[i].y < 0 || pos[i].y > SCREEN_H) pos[i].y = pos[i].y < 0 ? SCREEN_H : 0;
-        /* Wrapped: suppress the blend or it draws a streak. */
-        mye_transform_snap(it->world, it->entities[i]);
+        bool wrapped = false;
+        if (pos[i].x < 0 || pos[i].x > SCREEN_W) {
+            pos[i].x = pos[i].x < 0 ? SCREEN_W : 0;
+            wrapped = true;
+        }
+        if (pos[i].y < 0 || pos[i].y > SCREEN_H) {
+            pos[i].y = pos[i].y < 0 ? SCREEN_H : 0;
+            wrapped = true;
+        }
+        /* Only on the teleport. Snapping every step would suppress every
+         * blend and turn interpolation off for these entities entirely. */
+        if (wrapped) {
+            mye_transform_snap(it->world, it->entities[i]);
+        }
     }
 }
 
@@ -329,12 +339,14 @@ static void play_load(ecs_world_t *world, void *user)
             { .texture = game->tex_ship, .origin = { 16.0f, 16.0f },
               .tint = WHITE, .layer = 10 });
 
-    /* Child: its position is relative to the player. */
+    /* Child: its position is relative to the player, and interpolated in its
+     * own right -- the blend composes down the chain, so it stays attached. */
     ecs_entity_t shield = mye_entity_new(world);
     ecs_set(world, shield, MyePosition2D, { SHIELD_DISTANCE, 0.0f });
     ecs_set(world, shield, Shield, { 0 });
     ecs_set(world, shield, MyeLocalTransform, { MatrixIdentity() });
     ecs_set(world, shield, MyeWorldTransform, { MatrixIdentity() });
+    ecs_set(world, shield, MyeInterpolate, { 0 });
     ecs_set(world, shield, MyeSprite,
             { .texture = game->tex_shield, .origin = { 8.0f, 8.0f },
               .tint = WHITE, .layer = 9 });

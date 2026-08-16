@@ -11,14 +11,14 @@ C.
 
 | | | |
 |---|---|---|
-| [0. Build and run](#0-build-and-run) | [8. Sprite animation](#8-sprite-animation) | [16. Concurrency](#16-concurrency) |
-| [1. World, loop, shutdown](#1-the-world-the-loop-and-the-shutdown) | [9. Transform hierarchy](#9-the-transform-hierarchy) | [17. Logging](#17-logging) |
-| [2. Entities, components, systems](#2-entities-components-and-systems) | [10. Prefabs](#10-prefabs) | [18. Debug overlay & Explorer](#18-the-debug-overlay-and-the-flecs-explorer) |
-| [3. Phases](#3-phases-when-things-run) | [11. Scenes](#11-scenes) | [19. Testing](#19-testing-what-you-wrote) |
-| [4. Fixed timestep](#4-the-fixed-timestep) | [12. Audio](#12-audio) | [20. The web target](#20-the-web-target) |
-| [5. Interpolation](#5-render-interpolation-opt-in) | [13. 3D rendering](#13-3d-rendering) | [21. Capstone](#21-capstone-orbit-collector) |
-| [6. Allocators](#6-allocators) | [14. Skeletal animation](#14-skeletal-animation) | |
-| [7. Assets](#7-assets-and-handles) | [15. Serialization](#15-saving-and-loading) | |
+| [0. Build and run](#0-build-and-run) | [8. Sprite animation](#8-sprite-animation) | [16. Saving and loading](#16-saving-and-loading) |
+| [1. The world, the loop, and the shutdown](#1-the-world-the-loop-and-the-shutdown) | [9. The transform hierarchy](#9-the-transform-hierarchy) | [17. Concurrency](#17-concurrency) |
+| [2. Entities, components, and systems](#2-entities-components-and-systems) | [10. Prefabs](#10-prefabs) | [18. Logging](#18-logging) |
+| [3. Phases: when things run](#3-phases-when-things-run) | [11. Scenes](#11-scenes) | [19. The debug overlay and the flecs Explorer](#19-the-debug-overlay-and-the-flecs-explorer) |
+| [4. The fixed timestep](#4-the-fixed-timestep) | [12. Input actions](#12-input-actions) | [20. Testing what you wrote](#20-testing-what-you-wrote) |
+| [5. Render interpolation (opt-in)](#5-render-interpolation-opt-in) | [13. Audio](#13-audio) | [21. The web target](#21-the-web-target) |
+| [6. Allocators](#6-allocators) | [14. 3D rendering](#14-3d-rendering) | [22. Capstone: Orbit Collector](#22-capstone-orbit-collector) |
+| [7. Assets and handles](#7-assets-and-handles) | [15. Skeletal animation](#15-skeletal-animation) |  |
 
 ---
 
@@ -103,9 +103,9 @@ Useful `mye_config` fields, all optional:
 | `fixed_dt` | 1/60 | simulation step (§4) |
 | `max_steps_per_frame` | 5 | catch-up clamp (§4) |
 | `asset_workers` | 2 | background loading threads (§7) |
-| `worker_threads` | 0 | parallel simulation (§16) |
-| `headless` | false | no window, no GL, no audio — for tests (§19) |
-| `explorer` | on in Debug | live world inspector (§18) |
+| `worker_threads` | 0 | parallel simulation (§17) |
+| `headless` | false | no window, no GL, no audio — for tests (§20) |
+| `explorer` | on in Debug | live world inspector (§19) |
 
 ---
 
@@ -174,13 +174,14 @@ int main(void)
 Three things worth knowing immediately:
 
 - `[in]` marks a term read-only. It is not decoration: read-only terms are what
-  let flecs run systems in parallel later (§16).
+  let flecs run systems in parallel later (§17).
 - `mye_entity_new` rather than `ecs_new`. It tags the entity as belonging to
   the current scene so unloading a scene can delete it (§11).
 - **Structural changes are deferred.** Inside a system, `ecs_delete` and adding
-  components are queued until the end of the phase. An entity you create in a
-  system is not queryable until the next one. This is what makes it safe to
-  delete entities while iterating them.
+  or removing components are queued and applied at the next sync point — in
+  practice the end of the frame, or the end of each fixed-timestep run. An
+  entity you create in a system is not queryable immediately. This is what
+  makes it safe to delete entities while iterating them.
 
 ### Singletons
 
@@ -188,16 +189,18 @@ A singleton is a component stored on its own type's entity: one instance,
 world-wide. Use it for score, settings, and anything else there is exactly one
 of.
 
-```c
+```c file
 typedef struct Score { int points; } Score;
 ECS_COMPONENT_DECLARE(Score);
+```
 
+```c ctx
 ECS_COMPONENT_DEFINE(world, Score);
 ecs_add_id(world, ecs_id(Score), EcsSingleton);   /* flecs v4 needs this trait */
 
 ecs_singleton_set(world, Score, { .points = 0 });
-Score *s = ecs_singleton_ensure(world, Score);
-s->points += 10;
+Score *score = ecs_singleton_ensure(world, Score);
+score->points += 10;
 ```
 
 A system can take a singleton as an ordinary term — `ECS_SYSTEM(world, Tick,
@@ -215,27 +218,42 @@ of the pipeline rather than of the order you happened to write your code in.
 the stage a system belongs to means a module can add a draw system at any time
 and still land after the 3D pass and before `EndDrawing`.
 
-The frame, in order:
+A frame is two parts. `mye_progress` does a little work itself, then hands the
+rest to flecs' pipeline:
+
+| | What runs | Where |
+|---|---|---|
+| 1 | pending scene switch applied | `mye_progress`, not a system |
+| 2 | input polled | `mye_progress`, not a system |
+| 3 | **`MyeOnFixedUpdate`** — **your simulation**, run 0..n times (§4) | its own pipeline |
+| 4 | everything below, once | `ecs_progress` |
+
+Then, inside `ecs_progress`:
 
 | Phase | What lives there |
 |---|---|
-| `EcsOnLoad` | input polling, `MyeTime` update |
+| `EcsOnLoad` | `MyeTime` update |
 | `EcsPreUpdate` | timers |
-| **`MyeOnFixedUpdate`** | **your simulation** — run 0..n times (§4) |
 | `EcsOnUpdate` | per-frame gameplay: menus, scene switching, camera |
 | `EcsPostUpdate` | transform propagation (§9) |
-| `EcsPreStore` | sprite animation, sorting |
+| `EcsPreStore` | sprite animation, interpolation blend, sorting |
 | `EcsOnStore` | `BeginDrawing` + clear |
 | `MyeOnDraw3D` | the 3D pass |
 | `MyeOnDraw2D` | the world-space sprite pass |
 | **`MyeOnDrawUI`** | **your HUD and menus**, screen space |
 | `MyeOnRenderEnd` | `EndDrawing` |
 
+The part that surprises people: **the fixed steps run before the whole main
+pipeline, not in the middle of it.** Input is sampled outside the pipeline for
+the same reason — the fixed steps need this frame's input, and flecs forbids
+running a pipeline from inside one. So a system you register in `EcsOnLoad`
+runs *after* this frame's simulation has already happened, not before it.
+
 Drawing is split across phases rather than crammed into `EcsOnStore` so that a
 HUD system cannot accidentally draw *underneath* the world. You register into
 `MyeOnDrawUI` and the ordering takes care of itself.
 
-```c
+```c file
 /* Draws after the world, before EndDrawing -- regardless of registration order. */
 static void DrawHud(ecs_iter_t *it)
 {
@@ -243,11 +261,17 @@ static void DrawHud(ecs_iter_t *it)
     DrawText("HP 100", 20, 20, 20, RAYWHITE);
 }
 
-ECS_SYSTEM(world, DrawHud, MyeOnDrawUI, MyeRenderConfig);
+static void register_hud(ecs_world_t *world)
+{
+    ECS_SYSTEM(world, DrawHud, MyeOnDrawUI, MyeRenderConfig);
+}
 ```
 
-The `MyeRenderConfig` term is there because a system with no terms never runs.
-Querying a singleton makes it run exactly once per frame.
+The `MyeRenderConfig` term is there to make the system run exactly once per
+frame: it queries a singleton, so it matches one entity. (flecs would also run
+a term-less system once per frame, as a *task* — but naming the singleton
+documents what the system depends on, and keeps it from running before the
+render config exists.)
 
 ---
 
@@ -332,7 +356,7 @@ comparing the component in the Explorer against the screen would find a
 discrepancy with no visible cause. The engine should not diverge data from
 pixels behind your back — so you ask for it, per entity.
 
-```c
+```c ctx
 ecs_set(world, player, MyeInterpolate, { 0 });   /* that is the whole feature */
 ```
 
@@ -341,8 +365,10 @@ teleporting looks like a streak.** An entity wrapping from x=1270 to x=10 gets
 drawn across everything in between. Tell the engine the movement was not
 continuous:
 
-```c
-static void Wrap(ecs_iter_t *it)
+```c file
+/* Not named Wrap: raymath.h already defines one, and raylib's headers are
+ * everywhere in a game. */
+static void WrapAtEdges(ecs_iter_t *it)
 {
     MyePosition2D *p = ecs_field(it, MyePosition2D, 0);
     for (int i = 0; i < it->count; ++i) {
@@ -355,9 +381,24 @@ static void Wrap(ecs_iter_t *it)
 `mye_transform_snap` sets a flag the next blend consumes and clears. Calling it
 on an entity without `MyeInterpolate` is harmless.
 
-Interpolation and parenting do not combine yet: an interpolated child would
-need its parent's previous transform too. An entity with both is drawn from its
-own blended position, ignoring the parent.
+Interpolation composes through the hierarchy (§9). Each link blends its own
+motion between the last two fixed steps, and the chain is multiplied together
+at draw time into `MyeRenderTransform`, so a child stays rigidly attached to an
+interpolated parent instead of trailing it. Blending each link separately is
+what keeps the rate right: `MyeInterpolate` records where an entity was one
+*step* ago, while transforms are composed once per *frame*, and a frame can run
+two steps or none.
+
+`MyeRenderTransform` is display-only and appears next to `MyeWorldTransform` in
+the Explorer. The two agree exactly unless something in the entity's parent
+chain interpolates, and then only while `alpha` is non-zero. Never read it
+back as simulation state -- collision tested against it would make gameplay
+depend on framerate, which is exactly what the fixed timestep exists to
+prevent. Use `MyeWorldTransform` or `mye_world_position()` for anything that is
+not drawing.
+
+Interpolation is 2D-only: `MyeInterpolate` records `prev_x` and `prev_y`, and
+3D entities are drawn at their un-blended world transform.
 
 ---
 
@@ -378,7 +419,7 @@ pool, and a tracking wrapper.
 
 Note that free takes the size back:
 
-```c
+```c file
 void mye_free(mye_allocator a, void *ptr, size_t size);
 ```
 
@@ -393,7 +434,7 @@ is how raylib's allocations are routed through our tracking.
 The one you will use most. A bump arena, reset at the top of every frame:
 allocate, use it this frame, never free it.
 
-```c
+```c file
 static void DrawHud(ecs_iter_t *it)
 {
     const Score *score = ecs_field(it, Score, 0);
@@ -412,11 +453,11 @@ than growing, so a runaway allocation shows up as a missing HUD line instead of
 silently eating memory.
 
 **The frame arena is a bump pointer with no synchronisation.** Never touch it
-from a multi-threaded system (§16).
+from a multi-threaded system (§17).
 
 ### The others
 
-```c
+```c ctx
 /* Arena: many allocations, one bulk free. Good for level-load scratch. */
 mye_arena arena;
 mye_arena_init(&arena, mye_heap_allocator(), 64 * 1024);
@@ -429,7 +470,8 @@ mye_arena_deinit(&arena);
 
 /* Pool: fixed-size slots, O(1) alloc and free, no fragmentation. */
 mye_pool pool;
-mye_pool_init(&pool, mye_heap_allocator(), sizeof(Particle), 4096);
+mye_pool_init(&pool, mye_heap_allocator(), sizeof(Particle),
+               _Alignof(Particle), 4096);
 Particle *p = mye_pool_alloc(&pool);     /* NULL when exhausted */
 mye_pool_free(&pool, p);
 mye_pool_deinit(&pool);
@@ -504,7 +546,7 @@ GPU calls cannot happen off the main thread, so the split is exactly there.
 The handle is returned **immediately** and is usable at once; it resolves to a
 placeholder until the real thing lands.
 
-```c
+```c ctx
 mye_texture tex = mye_texture_load_async(world, "assets/bigmap.png");
 
 /* Draw a loading screen while pending. */
@@ -582,7 +624,7 @@ For a one-shot animation set `loop = false` and watch `finished`. It is set
 once the last frame has had its *full display time*, not merely when it is
 reached, so despawning on `finished` always shows every frame:
 
-```c
+```c file
 static void DespawnFinished(ecs_iter_t *it)
 {
     const MyeSpriteAnim *anim = ecs_field(it, MyeSpriteAnim, 0);
@@ -593,6 +635,47 @@ static void DespawnFinished(ecs_iter_t *it)
 ```
 
 Add `MyeHidden` to skip an entity when drawing without deleting it.
+
+### The 2D camera
+
+Sprites are drawn in **world** space, inside raylib's `BeginMode2D`. Which
+camera that uses is an entity with `MyeCamera2D` marked `active` — the engine
+takes the first one it finds, and falls back to an identity camera at zoom 1 if
+there is none, so a game without a camera still draws.
+
+`MyeOnDrawUI` runs outside `BeginMode2D`, which is why a HUD registered there
+stays put while the world scrolls underneath it.
+
+```c ctx
+ecs_entity_t camera = mye_entity_new(world);
+ecs_set(world, camera, MyeCamera2D,
+        { .camera = { .offset = { 500.0f, 320.0f },   /* screen centre */
+                      .target = { 0.0f, 0.0f },       /* world point shown there */
+                      .rotation = 0.0f, .zoom = 1.0f },
+          .active = true });
+```
+
+To follow the player, write `target` each frame from the player's position —
+in `EcsOnUpdate`, not a fixed step, so the camera tracks the interpolated
+picture rather than the stepped one:
+
+```c file
+static void CameraFollow(ecs_iter_t *it)
+{
+    MyeCamera2D *cam = ecs_field(it, MyeCamera2D, 0);
+    ecs_entity_t player = ecs_lookup(it->world, "player");
+    const MyePosition2D *pos = player ? ecs_get(it->world, player, MyePosition2D)
+                                      : NULL;
+    if (pos == NULL) return;
+
+    for (int i = 0; i < it->count; ++i) {
+        cam[i].camera.target = (Vector2){ pos->x, pos->y };
+    }
+}
+```
+
+A zero `zoom` would show nothing, so the engine treats it as 1 rather than
+silently drawing a blank screen.
 
 ---
 
@@ -673,6 +756,13 @@ int main(void)
     return mye_shutdown(world);
 }
 ```
+
+What a parent gives a child is its **placement**: the child's drawn position
+comes from the composed chain, including the parent's rotation and scale. The
+child sprite's own on-screen angle and size still come from its own
+`MyeRotation2D` and `MyeScale2D` — rotating a tank turns where its turret sits,
+but not which way the turret sprite points. Rotate the child too if you want
+both.
 
 **Both transform components are required.** An entity takes part in the
 hierarchy only if it has `MyeLocalTransform` and `MyeWorldTransform`; without
@@ -842,16 +932,59 @@ with it.
 
 ---
 
-## 12. Audio
+## 12. Input actions
+
+**What it is.** Bind keys, mouse buttons, gamepad buttons and gamepad axes to
+integer *actions*. Gameplay code asks about the action.
+
+**Why it is.** `IsKeyDown(KEY_W)` scattered through gameplay makes rebinding
+impossible, gamepad support a rewrite, and testing require synthetic key
+events. With actions, a test writes the action state directly and the same
+gameplay code runs headless.
+
+Several bindings can drive one action, and axis values from all of them sum and
+clamp to [-1, 1] — so WASD and arrows and a stick all work at once, for free.
+
+```c ctx
+enum { ACT_MOVE_X, ACT_MOVE_Y, ACT_JUMP };
+
+mye_input_bind_axis_keys(world, ACT_MOVE_X, KEY_A, KEY_D);       /* -1 .. +1 */
+mye_input_bind_axis_keys(world, ACT_MOVE_X, KEY_LEFT, KEY_RIGHT);
+mye_input_bind_gamepad_axis(world, ACT_MOVE_X, 0, GAMEPAD_AXIS_LEFT_X, 0.2f);
+mye_input_bind_key(world, ACT_JUMP, KEY_SPACE);
+mye_input_bind_gamepad_button(world, ACT_JUMP, 0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+
+/* In a system: */
+float dx = mye_action_value(world, ACT_MOVE_X);   /* analog */
+if (mye_action_pressed(world, ACT_JUMP)) { }      /* this frame only */
+if (mye_action_down(world, ACT_JUMP))    { }      /* held */
+```
+
+`pressed` is the rising edge and is true for exactly one frame. It is computed
+by comparing this frame's state to the previous one, from `IsKeyDown` — so a
+tap that begins *and* ends between two polls is missed entirely. At 60 FPS that
+takes a deliberate effort, but it is a real limitation rather than something
+the engine papers over.
+
+---
+
+---
+
+## 13. Audio
 
 **What it is.** `mye_sound_play(world, handle)` from anywhere. Requests are
 queued and played once per frame.
 
 **Why it is.** Two things fall out of queueing rather than playing immediately.
-First, a system can request a sound while running on a worker thread without
-touching the audio device. Second, and more audibly: twenty bullets hitting in
-one frame become **one** playback, not twenty stacked copies at twenty times
-the volume — duplicates in a frame collapse, and the loudest wins.
+First, a fixed-timestep system can run several times in one frame (§4), and
+without a queue a collision detected on each of three steps would fire three
+overlapping copies of the same sound. Second, and more audibly: twenty bullets
+hitting in one frame become **one** playback, not twenty stacked copies at
+twenty times the volume — duplicates in a frame collapse, and the loudest wins.
+
+The audio device belongs to the main thread, like the window. **Do not call
+`mye_sound_play` from a job or a multi-threaded system** — the queue it writes
+to is an unsynchronised singleton (§17).
 
 ```c
 /* audio.c -- a synthesised beep, no asset files. */
@@ -921,41 +1054,7 @@ one.
 
 ---
 
-### Input actions
-
-**What it is.** Bind keys, mouse buttons, gamepad buttons and gamepad axes to
-integer *actions*. Gameplay code asks about the action.
-
-**Why it is.** `IsKeyDown(KEY_W)` scattered through gameplay makes rebinding
-impossible, gamepad support a rewrite, and testing require synthetic key
-events. With actions, a test writes the action state directly and the same
-gameplay code runs headless.
-
-Several bindings can drive one action, and axis values from all of them sum and
-clamp to [-1, 1] — so WASD and arrows and a stick all work at once, for free.
-
-```c
-enum { ACT_MOVE_X, ACT_MOVE_Y, ACT_JUMP };
-
-mye_input_bind_axis_keys(world, ACT_MOVE_X, KEY_A, KEY_D);       /* -1 .. +1 */
-mye_input_bind_axis_keys(world, ACT_MOVE_X, KEY_LEFT, KEY_RIGHT);
-mye_input_bind_gamepad_axis(world, ACT_MOVE_X, 0, GAMEPAD_AXIS_LEFT_X, 0.2f);
-mye_input_bind_key(world, ACT_JUMP, KEY_SPACE);
-mye_input_bind_gamepad_button(world, ACT_JUMP, 0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
-
-/* In a system: */
-float dx = mye_action_value(world, ACT_MOVE_X);   /* analog */
-if (mye_action_pressed(world, ACT_JUMP)) { }      /* this frame only */
-if (mye_action_down(world, ACT_JUMP))    { }      /* held */
-```
-
-`pressed` is the rising edge and is true for exactly one frame — including for a
-tap that starts and ends within a single frame, which a naive
-`down && !was_down` misses.
-
----
-
-## 13. 3D rendering
+## 14. 3D rendering
 
 **What it is.** A mesh instance is an entity with `MyeMeshInstance` and the
 transform components. A camera is an entity with `MyeCamera3D`, a light an
@@ -1029,7 +1128,7 @@ components you could add yourself.
   metallic, roughness, normal, occlusion and emissive maps that glTF files
   actually ship, so a downloaded model looks the way its author intended.
 
-```c
+```c ctx
 cfg->use_pbr = true;    /* worth it the moment you load a real glTF */
 ```
 
@@ -1038,7 +1137,7 @@ Up to `MYE_MAX_LIGHTS` (4) directional lights are passed to the shader.
 
 ---
 
-## 14. Skeletal animation
+## 15. Skeletal animation
 
 **What it is.** A rigged model carries a skeleton and animation clips.
 `MyeModelAnimator` advances a clip; raylib interpolates between keyframes and
@@ -1047,7 +1146,7 @@ skins the mesh.
 **Why it is.** It is how a character walks. The engine's part is small — a
 frame counter with looping and speed — because raylib does the skinning.
 
-```c
+```c ctx
 mye_model fox = mye_model_load(world, "assets/models/Fox.glb");
 ecs_entity_t e = mye_mesh_spawn(world, fox, (Vector3){ 0, 0, 0 }, WHITE);
 
@@ -1073,7 +1172,7 @@ attribution**.
 
 ---
 
-## 15. Saving and loading
+## 16. Saving and loading
 
 **What it is.** flecs can reflect over component types it has been given a
 description of, and serialize the world to JSON.
@@ -1134,7 +1233,7 @@ fails silently with empty objects rather than loudly.
 
 ---
 
-## 16. Concurrency
+## 17. Concurrency
 
 **What it is.** Three separate things, in increasing order of how much rope
 they give you:
@@ -1161,7 +1260,7 @@ channel uses a plain mutex because it is not hot.
 
 ### Parallel systems
 
-```c
+```c fn
 ecs_world_t *world = mye_init(&(mye_config){ .worker_threads = 4 });
 
 /* ECS_SYSTEM does not take flags, so use the descriptor form. */
@@ -1250,7 +1349,7 @@ cannot fix. TSan found real races in this engine that ordinary testing did not
 
 ---
 
-## 17. Logging
+## 18. Logging
 
 **What it is.** One sink for the engine, raylib and flecs. `mye_log_install_hooks`
 redirects the other two into it.
@@ -1260,18 +1359,20 @@ a crash log unreadable. One sink also means you can *count* — a test can asser
 that a run produced zero errors, which is a cheap and surprisingly effective
 smoke test.
 
-```c
+```c ctx
+int orbs = 8, mines = 5;
+
 mye_log_set_level(MYE_LOG_INFO);
 mye_log_info("play: %d orbs, %d mines", orbs, mines);
 mye_log_warn("no controller found; keyboard only");
 
 mye_log_counts counts = mye_log_get_counts();
-if (counts.errors > 0) return 1;          /* fail the test */
+if (counts.error > 0) return;             /* fail the test */
 ```
 
 Point it wherever you like — a file, an in-game console, a test buffer:
 
-```c
+```c file
 static void to_stderr(mye_log_level level, const char *source, const char *msg,
                       void *user)
 {
@@ -1279,7 +1380,10 @@ static void to_stderr(mye_log_level level, const char *source, const char *msg,
     fprintf(stderr, "[%d %s] %s\n", (int)level, source, msg);
 }
 
-mye_log_set_sink(to_stderr, NULL);
+static void install_logging(void)
+{
+    mye_log_set_sink(to_stderr, NULL);
+}
 ```
 
 The counters are atomic: raylib logs from its asset worker threads, so they are
@@ -1287,7 +1391,7 @@ written from more than one thread.
 
 ---
 
-## 18. The debug overlay and the flecs Explorer
+## 19. The debug overlay and the flecs Explorer
 
 **What it is.** Two ways of seeing inside a running game. The overlay is an
 in-window panel — FPS, frame-time graph, entity and system counts, allocator
@@ -1300,7 +1404,7 @@ the second by showing you every entity, its component *values*, and every
 system and query — live, and editable while the game runs. For learning an ECS
 this is worth more than any amount of `printf`.
 
-```c
+```c fn
 ecs_world_t *world = mye_init(&(mye_config){
     .explorer = true,          /* on by default in Debug; ignored in Release */
     .explorer_port = 27750,
@@ -1314,7 +1418,7 @@ server. Override either way with `MYE_EXPLORER=0` or `MYE_EXPLORER=1`.
 
 ---
 
-## 19. Testing what you wrote
+## 20. Testing what you wrote
 
 **What it is.** Two layers. **Unit tests** cover one module with no window.
 **Integration tests** drive a whole feature — often the real game code — in a
@@ -1327,17 +1431,19 @@ on a leak so memory bugs fail the same run.
 
 The pattern for a feature test: build a headless world, run N frames, assert.
 
-```c
+```c test
 /* tests/integration/test_int_movement.c */
 #include "mye_test.h"
 
 #include "core/engine.h"
 #include "render/render2d.h"
 
-MYE_TEST(entities_move_at_a_fixed_rate)
+void game_setup(ecs_world_t *world);   /* your game, built as a library */
+
+TEST(entities_move_at_a_fixed_rate)
 {
     ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
-    MYE_ASSERT(world != NULL);
+    ASSERT_TRUE(world != NULL);
 
     game_setup(world);                       /* the real game's setup */
 
@@ -1345,13 +1451,15 @@ MYE_TEST(entities_move_at_a_fixed_rate)
 
     ecs_entity_t player = ecs_lookup(world, "player");
     const MyePosition2D *p = ecs_get(world, player, MyePosition2D);
-    MYE_ASSERT_NEAR(p->x, 100.0f, 0.01f);
+    ASSERT_NEAR(100.0f, p->x, 0.01f);
 
-    MYE_ASSERT(mye_shutdown(world) == 0);    /* also asserts no leaks */
+    ASSERT_EQ_INT(0, mye_shutdown(world));   /* also asserts no leaks */
 }
+
+TEST_MAIN(TEST_CASE(entities_move_at_a_fixed_rate))
 ```
 
-Because the timestep is fixed, `MYE_ASSERT_NEAR` on an exact expected value is
+Because the timestep is fixed, `ASSERT_NEAR` on an exact expected value is
 legitimate — the number does not depend on how fast the test machine is.
 
 Structure game code so this is possible: put the setup and systems in a library
@@ -1371,7 +1479,7 @@ example headless. Run it before you commit.
 
 ---
 
-## 20. The web target
+## 21. The web target
 
 **What it is.** The same source, compiled to WebAssembly with Emscripten, plus
 a development server that rebuilds and reloads the browser when you save.
@@ -1397,7 +1505,7 @@ Two decisions worth knowing about:
   select their version with a preprocessor conditional rather than the web
   build dictating a lowest common denominator:
 
-```c
+```c file
 #if defined(PLATFORM_WEB)
 #define MYE_GLSL_VERSION "#version 300 es\nprecision highp float;\n"
 #else
@@ -1415,7 +1523,7 @@ single-threaded.
 
 ---
 
-## 21. Capstone: Orbit Collector
+## 22. Capstone: Orbit Collector
 
 Every feature above, in one game.
 
@@ -1443,12 +1551,12 @@ What it uses, and where to look in the listing:
 | Hierarchy (§9) | the shield is a child of the player |
 | Prefabs (§10) | `OrbPrefab`, `MinePrefab` |
 | Scenes (§11) | `menu` and `play`, with reload as "restart" |
-| Audio (§12) | pickup and hit beeps, synthesised |
-| Input actions (§13's sibling) | `ACT_X`, `ACT_Y`, `ACT_CONFIRM`, keys and arrows both |
-| Logging (§17) | scene transitions and game over |
-| Overlay (§18) | F3 |
+| Audio (§13) | pickup and hit beeps, synthesised |
+| Input actions (§14's sibling) | `ACT_X`, `ACT_Y`, `ACT_CONFIRM`, keys and arrows both |
+| Logging (§18) | scene transitions and game over |
+| Overlay (§19) | F3 |
 
-```c
+```c capstone
 /* Orbit Collector -- the tutorial's capstone.
  *
  * Every engine feature TUTORIAL.md introduces, in one working game:
@@ -1624,10 +1732,20 @@ static void MineDrift(ecs_iter_t *it)
         pos[i].x += vel[i].x * dt;
         pos[i].y += vel[i].y * dt;
 
-        if (pos[i].x < 0 || pos[i].x > SCREEN_W) pos[i].x = pos[i].x < 0 ? SCREEN_W : 0;
-        if (pos[i].y < 0 || pos[i].y > SCREEN_H) pos[i].y = pos[i].y < 0 ? SCREEN_H : 0;
-        /* Wrapped: suppress the blend or it draws a streak. */
-        mye_transform_snap(it->world, it->entities[i]);
+        bool wrapped = false;
+        if (pos[i].x < 0 || pos[i].x > SCREEN_W) {
+            pos[i].x = pos[i].x < 0 ? SCREEN_W : 0;
+            wrapped = true;
+        }
+        if (pos[i].y < 0 || pos[i].y > SCREEN_H) {
+            pos[i].y = pos[i].y < 0 ? SCREEN_H : 0;
+            wrapped = true;
+        }
+        /* Only on the teleport. Snapping every step would suppress every
+         * blend and turn interpolation off for these entities entirely. */
+        if (wrapped) {
+            mye_transform_snap(it->world, it->entities[i]);
+        }
     }
 }
 
@@ -1780,12 +1898,14 @@ static void play_load(ecs_world_t *world, void *user)
             { .texture = game->tex_ship, .origin = { 16.0f, 16.0f },
               .tint = WHITE, .layer = 10 });
 
-    /* Child: its position is relative to the player. */
+    /* Child: its position is relative to the player, and interpolated in its
+     * own right -- the blend composes down the chain, so it stays attached. */
     ecs_entity_t shield = mye_entity_new(world);
     ecs_set(world, shield, MyePosition2D, { SHIELD_DISTANCE, 0.0f });
     ecs_set(world, shield, Shield, { 0 });
     ecs_set(world, shield, MyeLocalTransform, { MatrixIdentity() });
     ecs_set(world, shield, MyeWorldTransform, { MatrixIdentity() });
+    ecs_set(world, shield, MyeInterpolate, { 0 });
     ecs_set(world, shield, MyeSprite,
             { .texture = game->tex_shield, .origin = { 8.0f, 8.0f },
               .tint = WHITE, .layer = 9 });

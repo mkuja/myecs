@@ -10,6 +10,7 @@ ECS_COMPONENT_DECLARE(MyeRotation3D);
 ECS_COMPONENT_DECLARE(MyeScale3D);
 ECS_COMPONENT_DECLARE(MyeLocalTransform);
 ECS_COMPONENT_DECLARE(MyeWorldTransform);
+ECS_COMPONENT_DECLARE(MyeRenderTransform);
 
 /* ------------------------------------------------------------------ maths -- */
 
@@ -66,6 +67,30 @@ static void MyeLocalFrom2D(ecs_iter_t *it)
 }
 
 /* ------------------------------------------------------------ propagation -- */
+
+/* The drawn transform (see MyeRenderTransform) is carried by everything in
+ * the hierarchy, not only the interpolated entities, because an entity that
+ * does not interpolate still has to be drawn at its parent's blended
+ * position. Kept in step with MyeWorldTransform by these two observers. */
+static void MyeAddRenderTransform(ecs_iter_t *it)
+{
+    for (int i = 0; i < it->count; ++i) {
+        /* Deferred inside an observer, so it lands at the merge point rather
+         * than mutating the table being iterated. */
+        ecs_set(it->world, it->entities[i], MyeRenderTransform,
+                { MatrixIdentity() });
+    }
+}
+
+/* Without this, an entity that leaves the hierarchy but keeps its sprite
+ * would keep a MyeRenderTransform that outranks its position in the draw
+ * path -- freezing it at wherever it was last composed. */
+static void MyeRemoveRenderTransform(ecs_iter_t *it)
+{
+    for (int i = 0; i < it->count; ++i) {
+        ecs_remove(it->world, it->entities[i], MyeRenderTransform);
+    }
+}
 
 /* world = parent_world * local, or world = local at the root.
  *
@@ -142,6 +167,7 @@ void MyeTransformModuleImport(ecs_world_t *world)
     ECS_COMPONENT_DEFINE(world, MyeScale3D);
     ECS_COMPONENT_DEFINE(world, MyeLocalTransform);
     ECS_COMPONENT_DEFINE(world, MyeWorldTransform);
+    ECS_COMPONENT_DEFINE(world, MyeRenderTransform);
 
     /* EcsPostUpdate: after gameplay has moved things, before rendering. */
     ecs_system(world, {
@@ -185,5 +211,17 @@ void MyeTransformModuleImport(ecs_world_t *world)
               .trav = EcsChildOf },
         },
         .callback = MyePropagateTransforms,
+    });
+
+    ecs_observer(world, {
+        .query.terms = {{ .id = ecs_id(MyeWorldTransform) }},
+        .events = { EcsOnAdd },
+        .callback = MyeAddRenderTransform,
+    });
+
+    ecs_observer(world, {
+        .query.terms = {{ .id = ecs_id(MyeWorldTransform) }},
+        .events = { EcsOnRemove },
+        .callback = MyeRemoveRenderTransform,
     });
 }

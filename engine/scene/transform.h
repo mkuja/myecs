@@ -63,6 +63,21 @@ typedef struct MyeWorldTransform {
     Matrix m;
 } MyeWorldTransform;
 
+/* Where the entity is DRAWN this frame: the same chain as MyeWorldTransform,
+ * but with every interpolated link blended between its last two fixed steps.
+ * With nothing interpolating it equals MyeWorldTransform exactly.
+ *
+ * Display-only. Nothing may read it back as simulation state -- collision
+ * against it would make gameplay depend on framerate, which is the whole
+ * thing the fixed timestep exists to prevent. Use MyeWorldTransform, or
+ * mye_world_position(), for anything that is not drawing.
+ *
+ * Added automatically alongside MyeWorldTransform, because a child of an
+ * interpolated parent needs one even when it does not interpolate itself. */
+typedef struct MyeRenderTransform {
+    Matrix m;
+} MyeRenderTransform;
+
 extern ECS_COMPONENT_DECLARE(MyePosition2D);
 extern ECS_COMPONENT_DECLARE(MyeRotation2D);
 extern ECS_COMPONENT_DECLARE(MyeScale2D);
@@ -71,6 +86,7 @@ extern ECS_COMPONENT_DECLARE(MyeRotation3D);
 extern ECS_COMPONENT_DECLARE(MyeScale3D);
 extern ECS_COMPONENT_DECLARE(MyeLocalTransform);
 extern ECS_COMPONENT_DECLARE(MyeWorldTransform);
+extern ECS_COMPONENT_DECLARE(MyeRenderTransform);
 
 void MyeTransformModuleImport(ecs_world_t *world);
 
