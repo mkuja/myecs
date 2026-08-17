@@ -56,8 +56,11 @@ milestones M0–M5.
 
 ### Tier 2 — Important (second wave)
 
-- **Async asset loading** — worker thread does file I/O + decode; main thread
-  does GPU upload via a channel.
+- ~~**Async asset loading**~~ — *dropped.* Assets load at scene boundaries,
+  where a pause is what a loading screen is for, and the GPU upload is
+  main-thread-only regardless, so a worker could only ever do the decode
+  half. Streaming during play, if ever needed, is loads spread across frames
+  rather than a thread.
 - **Events** — gameplay events via flecs observers / `ecs_emit`.
 - **Prefabs** — reusable entity templates (flecs `EcsPrefab`).
 - **Sprite animation** — flipbook animation from atlas frames.

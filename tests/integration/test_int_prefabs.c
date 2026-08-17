@@ -15,7 +15,6 @@ static ecs_world_t *start_game(void)
 {
     ecs_world_t *world = mye_init(&(mye_config){
         .headless = true,
-        .asset_workers = -1,
     });
     if (world == NULL) {
         return NULL;

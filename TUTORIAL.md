@@ -102,7 +102,6 @@ Useful `mye_config` fields, all optional:
 | `frame_arena_bytes` | 1 MiB | per-frame scratch (§6) |
 | `fixed_dt` | 1/60 | simulation step (§4) |
 | `max_steps_per_frame` | 5 | catch-up clamp (§4) |
-| `asset_workers` | 2 | background loading threads (§7) |
 | `worker_threads` | 0 | parallel simulation (§17) |
 | `headless` | false | no window, no GL, no audio — for tests (§20) |
 | `explorer` | on in Debug | live world inspector (§19) |
@@ -540,32 +539,27 @@ int main(void)
 }
 ```
 
-### Loading without stalling
+### When to load
 
-`mye_texture_load` blocks. For anything bigger than a sprite that means a
-visible hitch. `mye_texture_load_async` hands the file read and decode to a
-worker thread, and the main thread uploads to the GPU when the pixels arrive —
-GPU calls cannot happen off the main thread, so the split is exactly there.
+Loading blocks, and that is the design rather than a gap: **load at scene
+boundaries** (§11). A scene's `load` function is the one place a pause is
+acceptable, because that is what a loading screen is for, and the GPU upload
+has to happen on the main thread regardless -- a worker could only ever do
+the decode half.
 
-The handle is returned **immediately** and is usable at once; it resolves to a
-placeholder until the real thing lands.
+If a game later needs to bring in assets *during* play without a hitch, the
+answer is to spread the loads over several frames -- a few per frame from a
+list -- not to add a thread. The upload still has to land on the main thread,
+so a thread buys only the decode, and costs you a whole concurrency story.
 
 ```c ctx
-mye_texture tex = mye_texture_load_async(world, "assets/bigmap.png");
-
-/* Draw a loading screen while pending. */
-if (!mye_assets_ready(world)) {
-    char *line = MYE_NEW_ARRAY(mye_frame_allocator(world), char, 32);
-    snprintf(line, 32, "loading (%zu)", mye_assets_pending(world));
-    DrawText(line, 20, 20, 20, GRAY);
-}
-
-/* Or check one asset. */
-if (mye_texture_status(world, tex) == MYE_ASSET_READY) { /* ... */ }
+/* In a scene load: pull in everything the scene needs, once. */
+mye_assets_set_scope(world, 1);          /* tag them, so unload releases them */
+mye_texture ship = mye_texture_load(world, "assets/ship.png");
+mye_texture rock = mye_texture_load(world, "assets/rock.png");
+(void)ship;
+(void)rock;
 ```
-
-Set `asset_workers = -1` in the config to force every load synchronous, which
-is what tests want.
 
 ---
 

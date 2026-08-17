@@ -60,7 +60,6 @@ static bool run_simulation(int threads, float *out, int count)
 {
     ecs_world_t *world = mye_init(&(mye_config){
         .headless = true,
-        .asset_workers = -1,
         .worker_threads = threads,
     });
     if (world == NULL) {
@@ -142,7 +141,6 @@ TEST(a_worker_world_starts_and_stops_cleanly)
     for (int round = 0; round < 3; ++round) {
         ecs_world_t *world = mye_init(&(mye_config){
             .headless = true,
-            .asset_workers = -1,
             .worker_threads = 4,
         });
         ASSERT_NOT_NULL(world);

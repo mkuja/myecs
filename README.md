@@ -115,7 +115,7 @@ rendering. Use it rather than `ecs_progress`.
 | `engine/core/engine` | lifecycle, frame loop, fixed timestep, render phases |
 | `engine/core/channel`, `jobs`, `thread` | mutex-backed queue, worker pool, threading shim |
 | `engine/input` | actions rather than key codes; replayable |
-| `engine/asset` | handle-based registry, sync and async loading |
+| `engine/asset` | handle-based registry, scene-scoped loading |
 | `engine/audio` | sound queue, deduplicated per frame |
 | `engine/render/render2d` | sprites, animation, camera, layer/y sorting |
 | `engine/render/render3d` | meshes, camera, directional lights |

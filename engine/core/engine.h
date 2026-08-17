@@ -75,7 +75,6 @@ struct mye_engine {
     bool window_open;
     uint64_t max_frames; /* 0 = unlimited */
     const char *screenshot_path;
-    int asset_workers;
 
     /* Pipeline holding every MyeOnFixedUpdate system, run once per fixed
      * step by the engine rather than once per frame by flecs. */
@@ -97,10 +96,6 @@ typedef struct mye_config {
     /* Per-frame scratch capacity in bytes. Default 1 MiB. */
     size_t frame_arena_bytes;
 
-    /* Worker threads for background asset loading. 0 uses the default (2 --
-     * loading is I/O bound); negative disables the pool, making every load
-     * synchronous. */
-    int asset_workers;
 
     /* flecs pipeline worker threads for SIMULATION systems. 0 or 1 keeps
      * everything on the main thread (the default, and the right starting

@@ -20,10 +20,9 @@
  * deployment constraint rather than a build flag, so the first web build
  * ships single-threaded.
  *
- * Nothing else has to know. mye_jobs_create fails, the asset registry falls
- * back to synchronous loading, and mye_texture_load_async loads inline --
- * paths that already existed and are tested (see
- * disabling_workers_falls_back_to_synchronous). */
+ * Nothing else has to know: mye_jobs_create fails, and a caller that wanted
+ * a pool runs its work inline instead. Asset loading is synchronous on every
+ * target, so it never had a thread to lose. */
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 #define MYE_THREADS_NONE 1
 #define MYE_THREADS_C11 0

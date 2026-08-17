@@ -8,8 +8,11 @@
  *   mye_texture tex = mye_texture_load(world, "sprites/ship.png");
  *   const Texture2D *t = mye_texture_get(world, tex);   // NULL if stale
  *
- * M3 loads synchronously. The async path (worker decodes, main thread
- * uploads) arrives in M4 behind these same functions. */
+ * Loading is synchronous, and deliberately so: assets are loaded at scene
+ * boundaries (see scene/scene.h), where a pause is what a loading screen is
+ * for, and the GPU upload has to happen on the main thread regardless. A
+ * game that later needs to stream during play should slice loads across
+ * frames rather than reach for a thread. */
 #ifndef MYE_ASSET_ASSET_H
 #define MYE_ASSET_ASSET_H
 
@@ -54,37 +57,12 @@ mye_texture mye_texture_load(ecs_world_t *world, const char *path);
 mye_texture mye_texture_from_image(ecs_world_t *world, const char *name,
                                    Image image);
 
-/* Queues a load on a worker thread and returns immediately. The handle is
- * valid straight away but resolves to the placeholder until the pixels have
- * been uploaded, so callers never wait and never branch on readiness.
- *
- * Split of responsibilities (see plan/05-concurrency.md):
- *   worker thread : read the file, decode it (CPU only, no GL)
- *   main thread   : upload to the GPU, in MyeAssetUpload during EcsPreStore
- *
- * Falls back to a synchronous load if no worker pool is available. */
-mye_texture mye_texture_load_async(ecs_world_t *world, const char *path);
-
-typedef enum mye_asset_status {
-    MYE_ASSET_MISSING = 0, /* no such handle, or it went stale */
-    MYE_ASSET_LOADING,     /* queued or decoding on a worker */
-    MYE_ASSET_READY,       /* usable */
-    MYE_ASSET_FAILED,      /* the file could not be read or decoded */
-} mye_asset_status;
-
-mye_asset_status mye_texture_status(const ecs_world_t *world,
-                                    mye_texture handle);
-
-/* True when nothing is still loading -- what a loading screen waits on. */
-bool mye_assets_ready(const ecs_world_t *world);
-/* How many loads are still in flight. */
-size_t mye_assets_pending(const ecs_world_t *world);
-
-/* NULL for an invalid or stale handle, and NULL while a load is in flight. */
+/* NULL for an invalid or stale handle. */
 const Texture2D *mye_texture_get(const ecs_world_t *world, mye_texture handle);
 
-/* Never NULL: falls back to a magenta placeholder so a missing asset is
- * visible on screen rather than a crash. */
+/* Falls back to a magenta placeholder, so a missing asset is visible on
+ * screen rather than a crash. Still NULL in a headless world: the
+ * placeholder is a GPU texture and there is no context to upload it to. */
 const Texture2D *mye_texture_get_or_placeholder(const ecs_world_t *world,
                                                 mye_texture handle);
 

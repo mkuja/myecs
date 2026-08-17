@@ -142,9 +142,8 @@ static void MyeDebugOverlayDraw(ecs_iter_t *it)
                      arena_cap);
     }
 
-    OVERLAY_LINE(dim, "assets %u tex   %u snd   %u mdl   %zu loading",
-                 assets.textures_live, assets.sounds_live, assets.models_live,
-                 mye_assets_pending(world));
+    OVERLAY_LINE(dim, "assets %u tex   %u snd   %u mdl",
+                 assets.textures_live, assets.sounds_live, assets.models_live);
 
     const char *scene = mye_scene_current(world);
     OVERLAY_LINE(dim, "scene  %s   %d owned entities",

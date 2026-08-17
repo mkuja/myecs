@@ -1,10 +1,7 @@
 #include "asset/asset.h"
 
-#include "core/channel.h"
-#include "core/jobs.h"
 #include "core/rl_alloc.h"
 
-#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -15,31 +12,12 @@ ECS_COMPONENT_DECLARE(MyeAssets);
 #define MYE_MAX_MODELS 128
 #define MYE_ASSET_KEY_MAX 128
 /* Deep enough that every texture slot can be in flight at once. */
-#define MYE_UPLOAD_QUEUE_CAPACITY 256
 
 typedef enum asset_state {
     ASSET_EMPTY = 0,
-    ASSET_LOADING, /* a worker is reading/decoding it */
     ASSET_LOADED,
     ASSET_FAILED,
 } asset_state;
-
-/* Sent from a worker thread to the main thread once decoding finishes. The
- * Image owns heap memory; whoever receives it must upload or unload it. */
-typedef struct upload_msg {
-    uint32_t index;
-    uint32_t generation;
-    Image image;
-    bool decoded_ok;
-} upload_msg;
-
-/* One per in-flight load. Owned by the job, freed after it sends. */
-typedef struct load_request {
-    struct mye_asset_db *db;
-    uint32_t index;
-    uint32_t generation;
-    char path[MYE_ASSET_KEY_MAX];
-} load_request;
 
 typedef struct texture_slot {
     uint32_t generation;
@@ -87,12 +65,6 @@ struct mye_asset_db {
 
     uint32_t textures_loaded_total;
     uint32_t scope; /* scope new assets are attributed to */
-
-    /* Async pipeline. Absent in headless worlds and when the pool fails to
-     * start, in which case loads fall back to synchronous. */
-    mye_jobs *jobs;
-    mye_channel *uploads;
-    atomic_size_t in_flight;
 };
 
 /* Generation 0 is never handed out, so a zeroed handle is always invalid. */
@@ -119,13 +91,12 @@ static void copy_key(char *dst, const char *src)
 }
 
 /* Matches slots that are loaded *or* still decoding. Including LOADING is
- * what makes dedupe work for async: a second request for a path already in
+ * what makes dedupe work: a second request for a path already in
  * flight must share that slot, not start a second decode and upload. */
 static int find_texture_by_key(const mye_asset_db *db, const char *key)
 {
     for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
-        if ((db->textures[i].state == ASSET_LOADED ||
-             db->textures[i].state == ASSET_LOADING) &&
+        if (db->textures[i].state == ASSET_LOADED &&
             strcmp(db->textures[i].key, key) == 0) {
             return i;
         }
@@ -287,11 +258,10 @@ void mye_texture_release(ecs_world_t *world, mye_texture handle)
     }
 
     /* Deliberately not resolve_texture(): a handle whose decode is still in
-     * flight must be releasable too. Abandoning it bumps the generation, so
-     * the worker's result is discarded when it arrives. */
+     * flight must be releasable too. */
     texture_slot *slot = &db->textures[handle.index];
     if (slot->generation != handle.generation ||
-        (slot->state != ASSET_LOADED && slot->state != ASSET_LOADING)) {
+        slot->state != ASSET_LOADED) {
         return;
     }
 
@@ -718,182 +688,6 @@ void mye_sound_release(ecs_world_t *world, mye_sound handle)
 }
 
 
-/* ----------------------------------------------------------------- async -- */
-
-/* Runs on a worker thread. Touches only its own request, the file system, and
- * the channel -- never the ECS world, never OpenGL. */
-static void decode_texture_job(void *arg)
-{
-    load_request *request = (load_request *)arg;
-    mye_asset_db *db = request->db;
-
-    /* LoadImage is CPU-only (stb_image); safe off the main thread. */
-    Image image = LoadImage(request->path);
-
-    upload_msg msg = {
-        .index = request->index,
-        .generation = request->generation,
-        .image = image,
-        .decoded_ok = image.data != NULL,
-    };
-
-    /* The queue is sized to the registry, so a full queue means something is
-     * badly wrong; drop the pixels rather than leak them. */
-    if (!mye_channel_send(db->uploads, &msg)) {
-        if (msg.decoded_ok) {
-            UnloadImage(image);
-        }
-        atomic_fetch_sub(&db->in_flight, 1);
-    }
-
-    mye_free(db->allocator, request, sizeof *request);
-}
-
-mye_texture mye_texture_load_async(ecs_world_t *world, const char *path)
-{
-    mye_asset_db *db = db_get(world);
-    if (db == NULL || path == NULL) {
-        return (mye_texture){ 0 };
-    }
-
-    /* No worker pool (headless, or it failed to start): just load inline. */
-    if (db->jobs == NULL || db->uploads == NULL) {
-        return mye_texture_load(world, path);
-    }
-
-    char key[MYE_ASSET_KEY_MAX];
-    copy_key(key, path);
-
-    /* Already loaded or already being loaded: share it. */
-    int existing = find_texture_by_key(db, key);
-    if (existing >= 0) {
-        ++db->textures[existing].refcount;
-        return (mye_texture){ .index = (uint32_t)existing,
-                              .generation = db->textures[existing].generation };
-    }
-
-    int index = find_free_texture_slot(db);
-    if (index < 0) {
-        return (mye_texture){ 0 };
-    }
-
-    /* Claim the slot now so the handle is usable immediately and a second
-     * request for the same path dedupes against it. */
-    texture_slot *slot = &db->textures[index];
-    if (slot->generation == 0) {
-        slot->generation = GENERATION_START;
-    }
-    slot->state = ASSET_LOADING;
-    slot->refcount = 1;
-    slot->scope = db->scope;
-    slot->texture = (Texture2D){ 0 };
-    copy_key(slot->key, key);
-
-    load_request *request = MYE_NEW(db->allocator, load_request);
-    if (request == NULL) {
-        slot->state = ASSET_EMPTY;
-        slot->key[0] = '\0';
-        return (mye_texture){ 0 };
-    }
-    request->db = db;
-    request->index = (uint32_t)index;
-    request->generation = slot->generation;
-    copy_key(request->path, path);
-
-    atomic_fetch_add(&db->in_flight, 1);
-    if (!mye_jobs_submit(db->jobs, decode_texture_job, request)) {
-        /* Queue full: fall back to loading it here rather than dropping it. */
-        atomic_fetch_sub(&db->in_flight, 1);
-        mye_free(db->allocator, request, sizeof *request);
-        slot->state = ASSET_EMPTY;
-        slot->key[0] = '\0';
-        return mye_texture_load(world, path);
-    }
-
-    return (mye_texture){ .index = (uint32_t)index,
-                          .generation = slot->generation };
-}
-
-/* Main thread: drains decoded images and uploads them to the GPU. Runs in
- * EcsPreStore, before anything draws this frame. */
-static void MyeAssetUpload(ecs_iter_t *it)
-{
-    ecs_world_t *world = it->world;
-    mye_asset_db *db = db_get(world);
-    if (db == NULL || db->uploads == NULL) {
-        return;
-    }
-
-    upload_msg msg;
-    while (mye_channel_recv(db->uploads, &msg)) {
-        atomic_fetch_sub(&db->in_flight, 1);
-
-        texture_slot *slot = &db->textures[msg.index];
-        /* The handle may have been released while the worker was decoding;
-         * the generation check is what makes that safe. */
-        bool slot_still_ours = slot->generation == msg.generation &&
-                               slot->state == ASSET_LOADING;
-
-        if (!slot_still_ours) {
-            if (msg.decoded_ok) {
-                UnloadImage(msg.image);
-            }
-            continue;
-        }
-
-        if (!msg.decoded_ok) {
-            slot->state = ASSET_FAILED;
-            continue;
-        }
-
-        if (db->headless) {
-            slot->texture = (Texture2D){ .id = 0, .width = msg.image.width,
-                                         .height = msg.image.height,
-                                         .mipmaps = 1 };
-        } else {
-            slot->texture = LoadTextureFromImage(msg.image);
-        }
-        UnloadImage(msg.image);
-
-        slot->state = ASSET_LOADED;
-        ++db->textures_loaded_total;
-    }
-}
-
-mye_asset_status mye_texture_status(const ecs_world_t *world,
-                                    mye_texture handle)
-{
-    const mye_asset_db *db = db_get(world);
-    if (db == NULL || handle.generation == 0 ||
-        handle.index >= MYE_MAX_TEXTURES) {
-        return MYE_ASSET_MISSING;
-    }
-
-    const texture_slot *slot = &db->textures[handle.index];
-    if (slot->generation != handle.generation) {
-        return MYE_ASSET_MISSING; /* stale */
-    }
-
-    switch (slot->state) {
-    case ASSET_LOADING: return MYE_ASSET_LOADING;
-    case ASSET_LOADED:  return MYE_ASSET_READY;
-    case ASSET_FAILED:  return MYE_ASSET_FAILED;
-    case ASSET_EMPTY:   break;
-    }
-    return MYE_ASSET_MISSING;
-}
-
-size_t mye_assets_pending(const ecs_world_t *world)
-{
-    mye_asset_db *db = db_get(world);
-    return db != NULL ? atomic_load(&db->in_flight) : 0;
-}
-
-bool mye_assets_ready(const ecs_world_t *world)
-{
-    return mye_assets_pending(world) == 0;
-}
-
 /* ---------------------------------------------------------------- scopes -- */
 
 void mye_assets_set_scope(ecs_world_t *world, uint32_t scope)
@@ -984,24 +778,6 @@ static void assets_fini(ecs_world_t *world, void *ctx)
         return;
     }
 
-    /* Order matters. Stop the workers first: mye_jobs_destroy waits for
-     * every in-flight decode to finish and send, so nothing can arrive after
-     * the channel is drained. Then drain, releasing any pixels that were
-     * decoded but never uploaded. */
-    if (db->jobs != NULL) {
-        mye_jobs_destroy(db->jobs);
-        db->jobs = NULL;
-    }
-    if (db->uploads != NULL) {
-        upload_msg pending;
-        while (mye_channel_recv(db->uploads, &pending)) {
-            if (pending.decoded_ok) {
-                UnloadImage(pending.image);
-            }
-        }
-        mye_channel_destroy(db->uploads);
-        db->uploads = NULL;
-    }
 
     for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
         if (db->textures[i].state == ASSET_LOADED &&
@@ -1069,25 +845,6 @@ void MyeAssetsModuleImport(ecs_world_t *world)
     const mye_engine *engine = mye_engine_get(world);
     db->headless = engine == NULL || engine->headless;
 
-    /* Async pipeline. Asset loading is I/O bound, so a couple of workers
-     * saturate it -- this is not the place to spend every core. Headless
-     * worlds get it too, so the pipeline stays testable. */
-    atomic_init(&db->in_flight, 0);
-    int workers = engine != NULL ? engine->asset_workers : 2;
-    if (workers > 0) {
-        db->uploads = mye_channel_create(a, MYE_UPLOAD_QUEUE_CAPACITY,
-                                         sizeof(upload_msg));
-        if (db->uploads != NULL) {
-            db->jobs = mye_jobs_create(a, workers,
-                                       MYE_UPLOAD_QUEUE_CAPACITY);
-            if (db->jobs == NULL) {
-                /* No pool: loads fall back to synchronous. */
-                mye_channel_destroy(db->uploads);
-                db->uploads = NULL;
-            }
-        }
-    }
-
     if (!db->headless) {
         /* Visible stand-in for anything that failed to load. */
         Image placeholder = GenImageColor(8, 8, MAGENTA);
@@ -1103,7 +860,6 @@ void MyeAssetsModuleImport(ecs_world_t *world)
 
     /* Uploads land before anything draws this frame. Registered even when
      * headless: the state transition to READY must still happen. */
-    ECS_SYSTEM(world, MyeAssetUpload, EcsPreStore, MyeAssets);
 
     ecs_atfini(world, assets_fini, db);
 }

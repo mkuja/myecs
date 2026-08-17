@@ -172,7 +172,6 @@ ecs_world_t *mye_init(const mye_config *config)
     if (cfg.frame_arena_bytes == 0) cfg.frame_arena_bytes = 1024 * 1024;
     if (cfg.fixed_dt <= 0.0f) cfg.fixed_dt = 1.0f / 60.0f;
     if (cfg.max_steps_per_frame <= 0) cfg.max_steps_per_frame = 5;
-    if (cfg.asset_workers == 0) cfg.asset_workers = 2;
     if (cfg.explorer_port == 0) cfg.explorer_port = 27750;
 
     /* On by default in debug builds only: an HTTP server has no business in
@@ -211,7 +210,6 @@ ecs_world_t *mye_init(const mye_config *config)
     engine->headless = cfg.headless;
     engine->window_open = false;
     engine->max_frames = cfg.max_frames;
-    engine->asset_workers = cfg.asset_workers;
 
     engine->screenshot_path = cfg.screenshot_path;
     const char *screenshot_env = getenv("MYE_SCREENSHOT");

@@ -13,7 +13,7 @@
 
 static ecs_world_t *make_world(void)
 {
-    return mye_init(&(mye_config){ .headless = true, .asset_workers = -1 });
+    return mye_init(&(mye_config){ .headless = true});
 }
 
 static int count_of(ecs_world_t *world, ecs_entity_t component)

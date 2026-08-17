@@ -25,8 +25,7 @@ static int unload_calls_a;
 
 static ecs_world_t *make_world(void)
 {
-    ecs_world_t *world = mye_init(&(mye_config){ .headless = true,
-                                                 .asset_workers = -1 });
+    ecs_world_t *world = mye_init(&(mye_config){ .headless = true});
     if (world != NULL) {
         ECS_COMPONENT_DEFINE(world, Marker);
     }

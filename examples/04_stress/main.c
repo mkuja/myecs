@@ -132,7 +132,6 @@ int main(void)
         .title = "myecs -- M7 stress",
         .headless = !windowed,
         .worker_threads = threads,
-        .asset_workers = -1,
         /* Enough scratch for the renderer's draw list at this scale. */
         .frame_arena_bytes = 16u * 1024u * 1024u,
     });

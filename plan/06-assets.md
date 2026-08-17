@@ -3,7 +3,7 @@
 ## Goals
 
 - Gameplay code refers to assets by **handle**, never raw pointers.
-- Assets load synchronously first (M2), asynchronously later (M4) without
+- Assets load synchronously, at scene boundaries, without
   changing call sites.
 - Scene unload releases exactly the assets that scene brought in
   (ref-counting), with leak reporting in debug.
@@ -53,17 +53,16 @@ releases them all. Shared assets survive via refcount if another scene also
 holds them. Debug builds report any handle still live at shutdown with the
 path that loaded it.
 
-## Sync now, async later
+## Synchronous, on purpose
 
 - **M2 (sync)**: `mye_texture_load` does raylib `LoadTexture` inline on the
   main thread. State goes straight to `LOADED`. Fine for small demos.
-- **M4 (async)**: same call returns immediately with state `LOADING`; a job
-  reads + decodes the file (`LoadImage` works off-thread — it's CPU/stb-based),
-  sends `{handle, Image}` over the channel; the `AssetUploadSystem`
-  (`EcsPreStore`, main thread) performs `LoadTextureFromImage` (GPU upload
-  must be main-thread — see [05-concurrency.md](05-concurrency.md)) and flips
-  the state to `LOADED`. Renderers draw the placeholder until then.
-- `mye_assets_ready(db)` / per-handle state queries let a loading screen wait
+- **Dropped (was M4): an async path.** A worker can only do the decode; the
+  GPU upload is main-thread-only, so the split buys half a load and costs a
+  concurrency story. Loading happens at scene boundaries, where a pause is
+  what a loading screen is for. Streaming during play, if it is ever needed,
+  is loads spread across frames -- no thread.
+- `mye_texture_valid()` reports whether a handle resolved; a scene knows what it loaded
   for a scene's asset set.
 
 ## Paths & formats
@@ -80,7 +79,7 @@ path that loaded it.
 - **Unit** (headless): handle generation/staleness, dedupe by path, refcount
   release order, placeholder on stale get, pool slot reuse — the registry is
   testable with a fake payload type, no raylib init needed.
-- **Integration**: M4's definition of done includes a headless async-load test
+- **Integration**: `tests/integration/test_int_assets.c` covers the registry headlessly -- dedupe, refcounts, stale handles, missing files.
   (fake decoder job + channel + drain loop → state transitions
   EMPTY→LOADING→LOADED) and a `render`-labeled smoke test loading a real PNG
   into a hidden-window world. See [09-testing.md](09-testing.md).

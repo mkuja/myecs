@@ -147,10 +147,10 @@ Notes for later:
   refcount, placeholder-on-stale. Slot storage uses `mye_pool`.
 - Worker pool (C11 threads) + `mye_channel` on Concurrency Kit
   ([05-concurrency.md](05-concurrency.md)).
-- Async load: worker decodes, main thread uploads to GPU.
-- Loading-screen support (`mye_assets_ready`).
+- ~~Async load~~ — removed later: see plan/06-assets.md. Loading happens at scene boundaries.
+- Loading-screen support: a scene load is the pause, so the screen is drawn around it.
 
-**DoD**: ✅ `tests/integration/test_int_async_assets.c` — 7 headless tests
+**DoD**: ✅ `tests/integration/test_int_assets.c` — 5 headless registry tests
 covering LOADING→READY transitions, concurrent loads, dedupe of in-flight
 requests, missing files, release-while-loading, shutdown mid-flight, and the
 synchronous fallback. Channel and job-pool unit tests (13 more). All three
@@ -322,7 +322,7 @@ the world to JSON before a reload and restore it after, so a rebuild does not
 restart the game. The serializer for it already exists (M6).
 
 Two habits to keep so this stays cheap: never add a second blocking loop, and
-keep every async path working with zero workers.
+keep every path working with zero workers.
 
 ## After M8 (Tier 3, unscheduled)
 

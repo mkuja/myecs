@@ -34,8 +34,7 @@ static void Move(ecs_iter_t *it)
 
 static ecs_world_t *make_world(void)
 {
-    ecs_world_t *world = mye_init(&(mye_config){ .headless = true,
-                                                 .asset_workers = -1 });
+    ecs_world_t *world = mye_init(&(mye_config){ .headless = true});
     if (world == NULL) {
         return NULL;
     }

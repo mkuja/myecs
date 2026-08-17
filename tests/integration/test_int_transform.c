@@ -11,7 +11,7 @@
 
 static ecs_world_t *make_world(void)
 {
-    return mye_init(&(mye_config){ .headless = true, .asset_workers = -1 });
+    return mye_init(&(mye_config){ .headless = true});
 }
 
 static void assert_near_v3(mye_test_ctx *T, Vector3 expected, Vector3 actual,
