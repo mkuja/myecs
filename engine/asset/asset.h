@@ -54,6 +54,20 @@ mye_texture mye_texture_load(ecs_world_t *world, const char *path);
 /* Registers an image the caller generated (raylib GenImage*, procedural art,
  * an atlas built at runtime). `name` is the dedupe key, so it must be unique.
  * The image is uploaded to the GPU and unloaded from CPU memory here. */
+/* Registers a texture the registry does NOT own: it hands out a handle and
+ * will never unload it. For a GPU object whose lifetime belongs to something
+ * else -- a canvas's colour attachment, freed by UnloadRenderTexture -- so
+ * that it can be referred to by handle like any other texture.
+ *
+ * The caller must release the handle before destroying the real owner. */
+mye_texture mye_texture_adopt(ecs_world_t *world, const char *name,
+                              Texture2D texture);
+
+/* Uploads an Image and registers it under `name`.
+ *
+ * TAKES OWNERSHIP of the image: it is unloaded here, on every path including
+ * failure and headless. Do not UnloadImage it yourself -- that is a double
+ * free, and the sanitizers will say so only if you happen to run them. */
 mye_texture mye_texture_from_image(ecs_world_t *world, const char *name,
                                    Image image);
 

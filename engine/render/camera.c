@@ -2,6 +2,7 @@
 #include "render/camera.h"
 
 #include "core/log.h"
+#include "render/canvas.h"
 #include "render/render2d.h"
 #include "render/render3d.h"
 
@@ -18,6 +19,7 @@ typedef struct MyeCameraState {
     ecs_query_t *cameras2d;
     bool warned_bare_parent;
     bool warned_too_many;
+    bool warned_bad_target;
 } MyeCameraState;
 
 ECS_COMPONENT_DECLARE(MyeCameraState);
@@ -183,7 +185,7 @@ static int camera_order(const ecs_world_t *world, ecs_entity_t camera,
  * handful, and it is stable, so equal orders keep entity order and the
  * picture does not shuffle between frames. */
 static int collect(const ecs_world_t *world, ecs_query_t *query, bool is_3d,
-                   ecs_entity_t *out, int max)
+                   ecs_entity_t target, ecs_entity_t *out, int max)
 {
     if (query == NULL || out == NULL || max <= 0) {
         return 0;
@@ -195,9 +197,35 @@ static int collect(const ecs_world_t *world, ecs_query_t *query, bool is_3d,
     ecs_iter_t it = ecs_query_iter(world, query);
     while (ecs_query_next(&it)) {
         for (int i = 0; i < it.count; ++i) {
-            bool active = is_3d ? ecs_field(&it, MyeCamera3D, 0)[i].active
-                                : ecs_field(&it, MyeCamera2D, 0)[i].active;
+            bool active;
+            ecs_entity_t cam_target;
+            if (is_3d) {
+                const MyeCamera3D *c = &ecs_field(&it, MyeCamera3D, 0)[i];
+                active = c->active;
+                cam_target = c->target;
+            } else {
+                const MyeCamera2D *c = &ecs_field(&it, MyeCamera2D, 0)[i];
+                active = c->active;
+                cam_target = c->target;
+            }
             if (!active) {
+                continue;
+            }
+            /* A target that is not a live canvas is malformed data, not a
+             * choice: fall back to the window and say so once. */
+            if (cam_target != 0 &&
+                (!ecs_is_alive(world, cam_target) ||
+                 !ecs_has(world, cam_target, MyeCanvas))) {
+                MyeCameraState *st = camera_state(world);
+                if (st != NULL && !st->warned_bad_target) {
+                    st->warned_bad_target = true;
+                    mye_log_warn("camera: render target %llu is not a live "
+                                 "canvas; drawing to the window instead",
+                                 (unsigned long long)cam_target);
+                }
+                cam_target = 0;
+            }
+            if (cam_target != target) {
                 continue;
             }
             if (count >= max) {
@@ -235,16 +263,32 @@ static int collect(const ecs_world_t *world, ecs_query_t *query, bool is_3d,
     return count;
 }
 
-int mye_camera3d_collect(const ecs_world_t *world, ecs_entity_t *out, int max)
+int mye_camera3d_collect_for(const ecs_world_t *world, ecs_entity_t target,
+                             ecs_entity_t *out, int max)
 {
     MyeCameraState *state = camera_state(world);
-    return state != NULL ? collect(world, state->cameras3d, true, out, max) : 0;
+    return state != NULL
+               ? collect(world, state->cameras3d, true, target, out, max)
+               : 0;
+}
+
+int mye_camera2d_collect_for(const ecs_world_t *world, ecs_entity_t target,
+                             ecs_entity_t *out, int max)
+{
+    MyeCameraState *state = camera_state(world);
+    return state != NULL
+               ? collect(world, state->cameras2d, false, target, out, max)
+               : 0;
+}
+
+int mye_camera3d_collect(const ecs_world_t *world, ecs_entity_t *out, int max)
+{
+    return mye_camera3d_collect_for(world, 0, out, max);
 }
 
 int mye_camera2d_collect(const ecs_world_t *world, ecs_entity_t *out, int max)
 {
-    MyeCameraState *state = camera_state(world);
-    return state != NULL ? collect(world, state->cameras2d, false, out, max) : 0;
+    return mye_camera2d_collect_for(world, 0, out, max);
 }
 
 Rectangle mye_camera_viewport(const ecs_world_t *world, ecs_entity_t camera)
@@ -260,11 +304,48 @@ Rectangle mye_camera_viewport(const ecs_world_t *world, ecs_entity_t camera)
     }
 
     if (vp.width <= 0.0f || vp.height <= 0.0f) {
+        /* Zero means "the whole target", and the target may be a canvas
+         * rather than the window. */
+        ecs_entity_t target = c3 != NULL ? c3->target
+                                         : (c2 != NULL ? c2->target : 0);
         int width, height;
-        screen_size(world, &width, &height);
+        /* ecs_is_alive FIRST: a camera keeps pointing at a canvas that has
+         * been destroyed -- collect() buckets it back onto the window and
+         * warns, but does not rewrite the game's component -- and flecs
+         * aborts on ecs_has for a dead entity in debug, dereferences NULL in
+         * release. The fallback collect() documents has to survive here too,
+         * because this is the very next thing the pass calls. */
+        if (target != 0 && ecs_is_alive(world, target) &&
+            ecs_has(world, target, MyeCanvas)) {
+            const MyeCanvas *canvas = ecs_get(world, target, MyeCanvas);
+            width = canvas->width;
+            height = canvas->height;
+        } else {
+            screen_size(world, &width, &height);
+        }
         vp = (Rectangle){ 0.0f, 0.0f, (float)width, (float)height };
     }
     return vp;
+}
+
+MyeSurface mye_camera_surface(const ecs_world_t *world, ecs_entity_t target)
+{
+    if (target != 0 && ecs_is_alive(world, target) &&
+        ecs_has(world, target, MyeCanvas)) {
+        const MyeCanvas *canvas = ecs_get(world, target, MyeCanvas);
+        if (canvas != NULL) {
+            return (MyeSurface){ canvas->width, canvas->height };
+        }
+    }
+    /* The window, at its CURRENT size. GetRenderWidth/Height track resizes
+     * and HiDPI; the configured size is the headless fallback, where nothing
+     * draws anyway. */
+    if (IsWindowReady()) {
+        return (MyeSurface){ GetRenderWidth(), GetRenderHeight() };
+    }
+    int width, height;
+    screen_size(world, &width, &height);
+    return (MyeSurface){ width, height };
 }
 
 ecs_entity_t mye_camera_at_screen(const ecs_world_t *world, Vector2 screen)
@@ -479,11 +560,27 @@ Vector2 mye_screen_to_world_2d(const ecs_world_t *world, Vector2 screen)
 
 /* GL's viewport origin is bottom-left; ours is top-left, like everything
  * else on screen. */
-static void set_viewport(Rectangle vp)
+/* The surface the camera currently being drawn sits on -- the window, or a
+ * canvas. Recorded here so the matching restore does not have to be told
+ * twice, and so that NEITHER depends on rlgl's idea of the framebuffer size:
+ * raylib writes that in BeginTextureMode and nowhere else, so it is stale
+ * after a window resize and after every EndTextureMode. Drawing is main
+ * thread only, between one begin and its end, so a static is the whole of
+ * the required lifetime. */
+static int surface_width = 0;
+static int surface_height = 0;
+
+static void set_viewport(Rectangle vp, int width, int height)
 {
-    int screen_h = GetScreenHeight();
+    surface_width = width;
+    surface_height = height;
+
+    /* The CURRENT surface's height, not the window's: inside a canvas they
+     * differ, and flipping against the window there puts the viewport off
+     * the edge of a smaller canvas -- the camera draws nothing, with no
+     * error anywhere. */
     int x = (int)vp.x;
-    int y = screen_h - (int)(vp.y + vp.height);
+    int y = height - (int)(vp.y + vp.height);
     int w = (int)vp.width;
     int h = (int)vp.height;
 
@@ -497,23 +594,27 @@ static void set_viewport(Rectangle vp)
 static void restore_viewport(void)
 {
     rlDisableScissorTest();
-    rlViewport(0, 0, GetScreenWidth(), GetScreenHeight());
+    rlViewport(0, 0, surface_width, surface_height);
 }
 
-void mye_camera_begin_3d(Rectangle viewport, Camera3D camera, bool clear)
+void mye_camera_begin_3d(Rectangle viewport, MyeSurface surface,
+                         Camera3D camera, MyeCameraClear clear)
 {
     rlDrawRenderBatchActive();
-    set_viewport(viewport);
+    set_viewport(viewport, surface.width, surface.height);
 
-    /* Every camera after the first must clear its own patch, or the previous
-     * camera's DEPTH values are still there and silently reject everything
-     * this one draws -- a minimap that renders nothing, with no error and no
-     * clue. glClear obeys the scissor box, so this clears the viewport only.
+    /* glClear obeys the scissor box, so this clears the viewport only.
      *
-     * Colour goes with it, which makes a viewport camera opaque: a minimap
-     * covers what is under it rather than blending into it. Two cameras
-     * sharing a rect therefore paint over each other, newest last. */
-    if (clear) {
+     * Clearing colour as well makes a viewport camera opaque: a minimap
+     * covers what is under it rather than blending into it, and two cameras
+     * sharing a rect paint over each other, newest last. An accumulating
+     * canvas is the case that needs the two separated -- see
+     * MyeCameraClear. */
+    if (clear == MYE_CAMERA_CLEAR_DEPTH) {
+        rlColorMask(false, false, false, false);
+        rlClearScreenBuffers();
+        rlColorMask(true, true, true, true);
+    } else if (clear == MYE_CAMERA_CLEAR_ALL) {
         rlClearScreenBuffers();
     }
 
@@ -556,10 +657,11 @@ void mye_camera_end_3d(void)
     restore_viewport();
 }
 
-void mye_camera_begin_2d(Rectangle viewport, Camera2D camera)
+void mye_camera_begin_2d(Rectangle viewport, MyeSurface surface,
+                         Camera2D camera)
 {
     rlDrawRenderBatchActive();
-    set_viewport(viewport);
+    set_viewport(viewport, surface.width, surface.height);
 
     /* raylib's screen-space projection covers the whole window, so with the
      * GL viewport narrowed the whole window would be squeezed into the rect.

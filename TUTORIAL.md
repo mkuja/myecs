@@ -770,6 +770,98 @@ The 3D equivalents are `mye_screen_ray` (what to intersect for picking) and
 `mye_world_to_screen`. A zero `zoom` would show nothing, so the engine treats
 it as 1 rather than silently drawing a blank screen.
 
+### Canvases: rendering somewhere other than the window
+
+Everything above draws to the window. A **canvas** is an off-screen surface a
+camera can draw into instead, and whose result is an ordinary texture you can
+draw *with* — on a sprite, in the HUD, on a mesh. A security monitor showing
+another room, a minimap on a dashboard, a rear-view mirror, picture-in-picture:
+all of them are "a camera renders into a canvas, something else displays the
+canvas."
+
+A canvas is an entity, so `canvas` below is an `ecs_entity_t` like any other —
+the snippets in this section share it the way the earlier ones share `world`
+and `player`:
+
+```c ctx
+canvas = mye_canvas_create(world, "minimap", 256, 256, BLACK);
+if (canvas == 0) {
+    return; /* the name was taken, or the size was refused; it says which */
+}
+
+/* Point a camera at it. That one field is the whole difference between a
+ * camera that draws on screen and one that does not. */
+ecs_entity_t eye = mye_camera3d_spawn(world, (Vector3){ 0.0f, 300.0f, 0.0f },
+                                      (Vector3){ 0.0f, 0.0f, 0.0f }, 45.0f);
+MyeCamera3D *c = ecs_get_mut(world, eye, MyeCamera3D);
+c->target = canvas;
+ecs_modified(world, eye, MyeCamera3D);
+```
+
+Now show it. As a sprite:
+
+```c ctx
+ecs_entity_t shown = mye_entity_new(world);
+ecs_set(world, shown, MyePosition2D, { 0.0f, 0.0f });
+ecs_set(world, shown, MyeSprite,
+        { .texture = mye_canvas_texture(world, canvas),
+          .source = mye_canvas_source_rect(world, canvas),
+          .tint = WHITE });
+```
+
+That `source` matters. Render textures are stored bottom-up, so drawn naively
+they come out upside down; `mye_canvas_source_rect` returns the rect that
+draws it the right way up, and you never have to remember which way that is.
+
+Or on a mesh, which is how you get a screen *inside* the world:
+
+```c ctx
+mye_model quad = mye_model_from_mesh(world, "monitor",
+                                     GenMeshCube(8.0f, 8.0f, 0.5f), WHITE);
+ecs_entity_t monitor = mye_mesh_spawn(world, quad,
+                                      (Vector3){ 0.0f, 4.0f, 0.0f }, WHITE);
+MyeMeshInstance *m = ecs_get_mut(world, monitor, MyeMeshInstance);
+m->texture = mye_canvas_texture(world, canvas);
+ecs_modified(world, monitor, MyeMeshInstance);
+```
+
+`MyeMeshInstance.texture` replaces the model's diffuse texture for that one
+instance. Note the asymmetry with sprites: a source rect can flip a sprite,
+but nothing here can flip a mesh's UVs, so **a canvas on a mesh is mirrored**
+unless the mesh was authored for it. That is a real limitation and the
+showcase example leaves it visible rather than hiding it.
+
+There is one thing the engine decides for you here. The camera filling the
+canvas draws the whole scene — including the monitor you just textured with
+that canvas. Sampling a texture while drawing into it is a *feedback loop*:
+GL leaves the result undefined, and WebGL logs an error for every such draw
+call. So while rendering into a canvas, anything textured with that same
+canvas is **skipped**. A monitor is simply absent from its own feed, and
+draws normally everywhere else. The alternative was not a different picture
+but an undefined one.
+
+**Ordering is the part that would otherwise bite.** Canvases are drawn in the
+`MyeOnDrawCanvases` phase, which runs *before* `MyeOnDraw3D` and
+`MyeOnDraw2D`. So the canvas a sprite displays was filled in earlier in the
+same frame — not last frame. You do not arrange this; the phase does.
+
+Two more fields, both about not doing work you did not ask for:
+
+```c ctx
+MyeCanvas *canvas_cfg = ecs_get_mut(world, canvas, MyeCanvas);
+canvas_cfg->active = false; /* stop rendering it; the texture keeps its
+                             * last contents, which is exactly what a paused
+                             * security feed should look like */
+canvas_cfg->clear = false;  /* do not wipe between frames: draw over what is
+                             * already there, for trails and paint effects */
+ecs_modified(world, canvas, MyeCanvas);
+```
+
+A canvas is a normal entity, so deleting the scene deletes it. To remove one
+by hand, `mye_canvas_destroy(world, canvas)` — which releases the texture
+handle and frees the GPU surface. Sprites still pointing at the old handle
+draw the placeholder rather than reading freed memory.
+
 ---
 
 ## 9. The transform hierarchy

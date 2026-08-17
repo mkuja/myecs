@@ -1,6 +1,7 @@
 #include "render/render3d.h"
 
 #include "render/camera.h"
+#include "render/canvas.h"
 
 #include "render/render2d.h" /* MyeHidden is shared by both renderers */
 
@@ -346,14 +347,15 @@ static void upload_lights(ecs_world_t *world, const MyeRender3dState *state,
 /* Draws the scene once, through one camera, into one viewport. */
 static void draw_through(ecs_world_t *world, const MyeRender3dState *state,
                          const MyeRender3dConfig *config, Camera3D camera,
-                         Rectangle viewport, bool clear)
+                         Rectangle viewport, MyeSurface surface,
+                         MyeCameraClear clear, ecs_entity_t target)
 {
     bool use_pbr = config->use_pbr && state->pbr_ready;
     if (state->shader_ready || use_pbr) {
         upload_lights(world, state, config, camera);
     }
 
-    mye_camera_begin_3d(viewport, camera, clear);
+    mye_camera_begin_3d(viewport, surface, camera, clear);
 
     if (config->draw_grid) {
         DrawGrid(config->grid_slices, config->grid_spacing);
@@ -368,6 +370,13 @@ static void draw_through(ecs_world_t *world, const MyeRender3dState *state,
         for (int i = 0; i < iter.count; ++i) {
             const Model *model = mye_model_get(world, instances[i].model);
             if (model == NULL || model->meshCount == 0) {
+                continue;
+            }
+
+            /* A mesh textured with the very canvas being drawn would sample
+             * the bound framebuffer. Leave it out of its own feed. */
+            if (mye_canvas_is_own_texture(world, target,
+                                          instances[i].texture)) {
                 continue;
             }
 
@@ -405,14 +414,53 @@ static void draw_through(ecs_world_t *world, const MyeRender3dState *state,
                 } else if (state->shader_ready) {
                     material.shader = state->shader;
                 }
-                Color base = material.maps[MATERIAL_MAP_DIFFUSE].color;
-                material.maps[MATERIAL_MAP_DIFFUSE].color = (Color){
+                if (material.maps == NULL) {
+                    continue; /* malformed material: nothing to draw with */
+                }
+
+                /* PER-INSTANCE STATE, WRITTEN INTO SHARED STATE.
+                 *
+                 * raylib's Material carries `maps` as a POINTER, so the
+                 * struct copy above still aliases the MODEL's map array --
+                 * which every entity using that model draws with. Writing a
+                 * tint or a texture there is therefore not per-instance at
+                 * all:
+                 *
+                 *   - the tint compounds, because `base` is re-read from the
+                 *     already-modified shared value each frame: a 50% grey
+                 *     tint halves the model's colour sixty times a second
+                 *     until it is black. A WHITE tint is idempotent, which is
+                 *     the only reason this was never seen;
+                 *   - a per-instance texture appears on every other entity
+                 *     sharing the model.
+                 *
+                 * A local copy of the array is not an option: DrawMesh
+                 * indexes every slot up to raylib's MAX_MATERIAL_MAPS, which
+                 * is private to rmodels.c, so the length would be a guess.
+                 * Save the two fields, draw, put them back. */
+                MaterialMap *diffuse = &material.maps[MATERIAL_MAP_DIFFUSE];
+                const Texture2D saved_texture = diffuse->texture;
+                const Color base = diffuse->color;
+
+                /* Per-instance texture override, if any: this is how a canvas
+                 * ends up on a surface. */
+                const Texture2D *override_tex =
+                    mye_texture_get(world, instances[i].texture);
+                if (override_tex != NULL) {
+                    diffuse->texture = *override_tex;
+                }
+
+                diffuse->color = (Color){
                     (unsigned char)((int)base.r * instances[i].tint.r / 255),
                     (unsigned char)((int)base.g * instances[i].tint.g / 255),
                     (unsigned char)((int)base.b * instances[i].tint.b / 255),
                     (unsigned char)((int)base.a * instances[i].tint.a / 255),
                 };
+
                 DrawMesh(model->meshes[m], material, matrix);
+
+                diffuse->texture = saved_texture;
+                diffuse->color = base;
             }
         }
     }
@@ -423,30 +471,60 @@ static void draw_through(ecs_world_t *world, const MyeRender3dState *state,
 /* Every active camera draws, in order: a minimap is a second camera entity
  * and nothing else. One camera is the same code path, drawing once into the
  * whole window. */
-static void MyeRender3dPass(ecs_iter_t *it)
+/* Draws every 3D camera rendering into `target` (0 = the window), in order.
+ * Called by the window's pass below and, per canvas, by the canvas module.
+ *
+ * `already_cleared` says the target was just cleared by its owner, so the
+ * first camera can composite onto it. Later cameras clear their own viewport
+ * regardless, or they draw into the previous camera's depth buffer and
+ * vanish. */
+void mye_render3d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
+                                   bool already_cleared)
 {
-    const MyeRender3dConfig *config = ecs_field(it, MyeRender3dConfig, 0);
-    ecs_world_t *world = it->world;
-
     const MyeRender3dState *state = render3d_state(world);
     if (state == NULL || state->meshes == NULL) {
         return;
     }
+    const MyeRender3dConfig *config = ecs_singleton_get(world,
+                                                        MyeRender3dConfig);
+    if (config == NULL) {
+        return;
+    }
 
     ecs_entity_t cameras[MYE_MAX_DRAWN_CAMERAS];
-    int count = mye_camera3d_collect(world, cameras, MYE_MAX_DRAWN_CAMERAS);
+    int count = mye_camera3d_collect_for(world, target, cameras,
+                                         MYE_MAX_DRAWN_CAMERAS);
+
+    /* One surface for the whole pass: every camera collected here renders
+     * onto the same target by construction. */
+    MyeSurface surface = mye_camera_surface(world, target);
 
     for (int i = 0; i < count; ++i) {
         Camera3D camera;
         if (!mye_camera3d_resolve(world, cameras[i], &camera)) {
             continue;
         }
-        /* The first camera composites onto the frame's clear; the rest
-         * clear their own viewport, or they draw into the previous
-         * camera's depth buffer and vanish. */
+        /* The first camera composites onto whatever the target already
+         * holds: a window or a clearing canvas just wiped it, and an
+         * accumulating canvas is deliberately keeping last frame's picture --
+         * but even then depth must be reset, or last frame's depth values
+         * reject this frame's meshes. Every later camera owns its viewport
+         * outright. */
+        MyeCameraClear clear = MYE_CAMERA_CLEAR_ALL;
+        if (i == 0) {
+            clear = already_cleared ? MYE_CAMERA_CLEAR_NONE
+                                    : MYE_CAMERA_CLEAR_DEPTH;
+        }
         draw_through(world, state, config, camera,
-                     mye_camera_viewport(world, cameras[i]), i > 0);
+                     mye_camera_viewport(world, cameras[i]), surface, clear,
+                     target);
     }
+}
+
+static void MyeRender3dPass(ecs_iter_t *it)
+{
+    (void)ecs_field(it, MyeRender3dConfig, 0);
+    mye_render3d_draw_cameras_for(it->world, 0, true);
 }
 
 /* ------------------------------------------------------------ animation -- */

@@ -10,7 +10,7 @@ warnings-as-errors flags the engine itself uses.
 
     ```c            a complete program -- compiled and linked
     ```c file       file-scope code -- wrapped with includes
-    ```c ctx        statements -- wrapped with world/player/camera/cfg
+    ```c ctx        statements -- wrapped with world/player/camera/canvas/cfg
     ```c fn         statements that declare their own world -- wrapped bare
     ```c test       a test file -- compiled against mye_test.h
     ```c capstone   the capstone listing -- diffed against the real source
@@ -57,6 +57,7 @@ PREAMBLE = """\
 #include "core/rl_alloc.h"
 #include "input/input.h"
 #include "render/camera.h"
+#include "render/canvas.h"
 #include "render/render2d.h"
 #include "render/render3d.h"
 #include "scene/scene.h"
@@ -96,9 +97,10 @@ void game_setup(ecs_world_t *world);
 
 CTX_OPEN = """
 static void mye_doc_fragment(ecs_world_t *world, ecs_entity_t player,
-                             ecs_entity_t camera, MyeRender3dConfig *cfg)
+                             ecs_entity_t camera, ecs_entity_t canvas,
+                             MyeRender3dConfig *cfg)
 {
-    (void)world; (void)player; (void)camera; (void)cfg;
+    (void)world; (void)player; (void)camera; (void)canvas; (void)cfg;
 """
 
 FN_OPEN = """

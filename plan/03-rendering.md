@@ -220,12 +220,104 @@ affected, because resolving recomputes from components -- but anything
 parented *to* such a camera lags a frame. Parent cameras to things; do not
 parent things to a following camera.
 
+## Canvases
+
+A camera does not have to draw on the window. `MyeCamera*.target` names a
+**canvas** — an off-screen surface (`MyeCanvas`, `render/canvas.h`) whose
+result is an ordinary texture, usable on a sprite, on a mesh
+(`MyeMeshInstance.texture`), or in a HUD system. `target == 0` means the
+window, so a game that never mentions canvases takes exactly the path it did
+before.
+
+The ordering is the substance of the feature. Canvases render in
+`MyeOnDrawCanvases`, a phase between `MyeOnCamera` and `MyeOnDraw3D`, so
+everything a canvas contains is finished before anything that displays it
+starts drawing. Get that backwards and the picture still looks plausible --
+it is simply one frame old, which is invisible until something moves fast.
+
+Two details that are easy to get wrong and silent when wrong:
+
+- Viewport flipping must use the **current** framebuffer's height
+  (`rlGetFramebufferHeight`), not the window's. Inside a canvas they differ,
+  and flipping against the window puts a camera's viewport off the edge of a
+  smaller canvas -- it draws nothing, with no error anywhere.
+- raylib is asymmetric about that height: `BeginTextureMode` records the
+  canvas's size with `rlSetFramebufferHeight` and `EndTextureMode` never
+  restores it. The canvas pass restores it, or every window camera for the
+  rest of the frame is flipped against the canvas and the whole window's
+  output slides down the screen.
+
+The canvas's colour attachment is registered with the asset database as an
+**unowned** texture, so a handle to it behaves like any other texture handle
+while the canvas -- not the asset system -- remains responsible for freeing
+the GPU surface. Releasing a canvas texture must not `UnloadTexture` it, or
+the canvas is destroyed twice. Note this is one of the few things here with
+no test that can fail: deleting a GL name twice is a no-op by specification
+and invisible to the sanitizers, which see only CPU memory.
+
+Adoption deliberately does **not** dedupe by name the way `mye_texture_load`
+does. For a file, the same path really is the same pixels; for an adopted GPU
+object it would hand the caller somebody else's texture -- the canvas
+displays an unrelated picture, and two independent lifetimes end up behind
+one refcount, leaving a handle the registry calls valid after the real owner
+has freed it. A name collision is refused and logged.
+
+A camera whose canvas has been **destroyed** is ordinary: the game's
+component still names a dead entity, because the engine does not rewrite what
+the game wrote. Every path that reads a camera's `target` therefore checks
+`ecs_is_alive` before `ecs_has` -- flecs aborts on the latter for a dead
+entity in debug builds and dereferences NULL in release, so the documented
+"falls back to the window" behaviour is a crash the moment it is not
+guarded.
+
+**A surface cannot appear in its own feed.** The camera that fills a canvas
+draws the whole scene, which includes any mesh or sprite textured with that
+canvas -- sampling the framebuffer being written. GL calls this a feedback
+loop and leaves the pixels undefined; WebGL logs `GL_INVALID_OPERATION` per
+draw call (the showcase produced 504 of them in forty seconds before this was
+handled). Both passes therefore skip a surface whose texture is the canvas
+currently being drawn. It is the one place the engine overrides what the game
+asked for, and it is justified because the alternative is not a different
+picture but an undefined one. A layer mask (C2) would let a game exclude more
+than this minimum; this rule is what makes the mesh path correct without it.
+
+Deliberately not in scope: canvases that display other canvases (one level
+only), resizing a canvas in place (destroy and recreate), and flipping a
+mesh's UVs so a canvas on a mesh is not mirrored.
+
+### The material-aliasing trap
+
+`MyeMeshInstance.texture` exposed an older bug worth recording, because the
+same shape will recur for any future per-instance material state. raylib's
+`Material` holds `maps` as a **pointer**, so
+
+```c
+Material material = model->materials[model->meshMaterial[m]];  /* aliases! */
+```
+
+copies the struct but shares the map array with the model every other entity
+draws with. The 3D pass wrote both the per-instance tint and (briefly) the
+per-instance texture straight into it. Two consequences, neither of which
+raises anything:
+
+- the tint **compounded**, because the base colour was re-read from the
+  already-modified shared value each frame -- a 50% grey tint halves the
+  model's colour sixty times a second until it is black. A `WHITE` tint is
+  idempotent, which is the only reason this survived unnoticed;
+- a per-instance texture appeared on **every** entity sharing the model.
+
+The pass now saves the diffuse map's colour and texture, draws, and puts them
+back. A local copy of the array would be the tidier fix but is not available:
+`DrawMesh` indexes every slot up to `MAX_MATERIAL_MAPS`, which is private to
+raylib's `rmodels.c`, so the length would be a guess. Both halves are pinned
+by pixel tests (`test_int_render_cameras.c`).
+
 ## What we deliberately postpone
 
 - Custom shader/material system (Tier 3) — raylib `Material` + default shader
   until then.
-- Post-processing (render textures) — trivial to add later via
-  `BeginTextureMode`, but not scheduled.
+- Post-processing — a canvas is the mechanism; a full-screen effect pass over
+  one is not scheduled.
 - Instanced drawing (`DrawMeshInstanced`) — only if a demo needs thousands of
   identical meshes.
 

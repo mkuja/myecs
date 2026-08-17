@@ -102,6 +102,10 @@ typedef struct MyeCamera2D {
      * order draws later. */
     Rectangle viewport;
     int order;
+
+    /* Which canvas this camera renders into: a MyeCanvas entity, or 0 for
+     * the window. See render/canvas.h. */
+    ecs_entity_t target;
 } MyeCamera2D;
 /* No rotation field: the view turns with the entity's MyeRotation2D and its
  * parents, like everything else. */
@@ -120,6 +124,15 @@ extern ECS_COMPONENT_DECLARE(MyeCamera2D);
 extern ECS_COMPONENT_DECLARE(MyeRenderConfig);
 
 void MyeRender2dModuleImport(ecs_world_t *world);
+
+/* Draws every 2D camera whose target is `target` (0 = the window). The
+ * canvas module calls this per canvas. `fallback_without_camera` draws the
+ * world once in raw coordinates when there is no camera at all -- true for
+ * the window, so a game that never made one still sees its sprites; false
+ * for a canvas, which should stay empty rather than accidentally receive
+ * the whole world. Main thread, inside a draw phase. */
+void mye_render2d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
+                                   bool fallback_without_camera);
 
 /* Suppresses interpolation for this entity on the next frame. Call it
  * whenever you move an entity discontinuously -- teleports, respawns, screen

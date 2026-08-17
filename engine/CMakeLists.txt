@@ -9,6 +9,7 @@ add_library(engine STATIC
     asset/asset.c
     audio/audio.c
     render/camera.c
+    render/canvas.c
     render/render2d.c
     render/render3d.c
     scene/scene.c

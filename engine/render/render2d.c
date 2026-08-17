@@ -1,12 +1,14 @@
 #include "render/render2d.h"
 
 #include "render/camera.h"
+#include "render/canvas.h"
 
 #include "core/log.h"
 
 #include <raymath.h>
 #include <rlgl.h>
 
+#include <math.h>
 #include <stdlib.h>
 
 ECS_COMPONENT_DECLARE(MyeSprite);
@@ -72,9 +74,12 @@ static void MyeRenderBegin(ecs_iter_t *it)
     ClearBackground(config->clear_color);
 }
 
-static void MyeRenderSprites(ecs_iter_t *it)
+/* Draws every 2D camera rendering into `target` (0 = the window), in order.
+ * The sprite list is built once and drawn per camera: sorting it again per
+ * camera would be the same work repeated. */
+void mye_render2d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
+                                   bool fallback_without_camera)
 {
-    ecs_world_t *world = it->world;
     const MyeRender2dState *state = render_state(world);
     if (state == NULL || state->sprites == NULL) {
         return;
@@ -116,6 +121,13 @@ static void MyeRenderSprites(ecs_iter_t *it)
             ecs_field(&iter, MyeRenderTransform, 5);
 
         for (int i = 0; i < iter.count && count < total; ++i) {
+            /* A sprite showing the very canvas being drawn would sample the
+             * bound framebuffer -- undefined pixels, and a WebGL error per
+             * draw. Leave it out of its own feed; it draws everywhere else. */
+            if (mye_canvas_is_own_texture(world, target, sprites[i].texture)) {
+                continue;
+            }
+
             const Texture2D *texture =
                 mye_texture_get_or_placeholder(world, sprites[i].texture);
             if (texture == NULL) {
@@ -159,8 +171,13 @@ static void MyeRenderSprites(ecs_iter_t *it)
             items[count++] = (draw_item){
                 .texture = texture,
                 .source = source,
-                .dest = { draw_x, draw_y, source.width * sx,
-                          source.height * sy },
+                /* Absolute: a negative source width or height means
+                 * "draw mirrored" (raylib's idiom, and what a canvas needs
+                 * because render textures are stored bottom-up). Letting the
+                 * sign through to the destination would move the quad
+                 * instead of flipping its contents. */
+                .dest = { draw_x, draw_y, fabsf(source.width) * sx,
+                          fabsf(source.height) * sy },
                 .origin = { sprites[i].origin.x * sx, sprites[i].origin.y * sy },
                 .rotation_degrees = angle * RAD2DEG,
                 .tint = sprites[i].tint,
@@ -175,12 +192,14 @@ static void MyeRenderSprites(ecs_iter_t *it)
      * viewport, in order. The list is built once: sorting it per camera
      * would be the same work repeated. */
     ecs_entity_t cameras[MYE_MAX_DRAWN_CAMERAS];
-    int camera_count = mye_camera2d_collect(world, cameras,
-                                            MYE_MAX_DRAWN_CAMERAS);
+    int camera_count = mye_camera2d_collect_for(world, target, cameras,
+                                                MYE_MAX_DRAWN_CAMERAS);
 
-    if (camera_count == 0) {
+    if (camera_count == 0 && fallback_without_camera) {
         /* No camera at all: draw once in world coordinates, so a game that
-         * never sets one still sees its sprites. */
+         * never sets one still sees its sprites. A canvas gets no such
+         * fallback -- a canvas with no camera should stay empty, not
+         * accidentally receive the whole world. */
         BeginMode2D((Camera2D){ .zoom = 1.0f });
         for (int32_t i = 0; i < count; ++i) {
             DrawTexturePro(*items[i].texture, items[i].source, items[i].dest,
@@ -191,12 +210,15 @@ static void MyeRenderSprites(ecs_iter_t *it)
         return;
     }
 
+    MyeSurface surface = mye_camera_surface(world, target);
+
     for (int c = 0; c < camera_count; ++c) {
         Camera2D camera;
         if (!mye_camera2d_resolve(world, cameras[c], &camera)) {
             continue;
         }
-        mye_camera_begin_2d(mye_camera_viewport(world, cameras[c]), camera);
+        mye_camera_begin_2d(mye_camera_viewport(world, cameras[c]), surface,
+                            camera);
         for (int32_t i = 0; i < count; ++i) {
             DrawTexturePro(*items[i].texture, items[i].source, items[i].dest,
                            items[i].origin, items[i].rotation_degrees,
@@ -204,6 +226,12 @@ static void MyeRenderSprites(ecs_iter_t *it)
         }
         mye_camera_end_2d();
     }
+}
+
+static void MyeRenderSprites(ecs_iter_t *it)
+{
+    (void)ecs_field(it, MyeRenderConfig, 0);
+    mye_render2d_draw_cameras_for(it->world, 0, true);
 }
 
 static void MyeRenderEnd(ecs_iter_t *it)

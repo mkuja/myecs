@@ -24,6 +24,11 @@ typedef struct texture_slot {
     uint32_t scope; /* which scene loaded it; 0 = unscoped */
     char key[MYE_ASSET_KEY_MAX];
     Texture2D texture;
+    /* False for a texture the registry only *refers* to -- a canvas's colour
+     * attachment belongs to its RenderTexture2D, and UnloadRenderTexture
+     * frees it. Unloading it here as well is a double free of a GL name,
+     * which shows up later as some unrelated texture turning black. */
+    bool owned;
 } texture_slot;
 
 typedef struct model_slot {
@@ -127,12 +132,12 @@ static texture_slot *resolve_texture(const mye_asset_db *db,
 
 /* -------------------------------------------------------------- textures -- */
 
-static mye_texture claim_texture_slot(mye_asset_db *db, const char *key,
-                                      Texture2D texture)
+static mye_texture claim_texture_slot_ex(mye_asset_db *db, const char *key,
+                                         Texture2D texture, bool owned)
 {
     int index = find_free_texture_slot(db);
     if (index < 0) {
-        if (texture.id != 0) {
+        if (texture.id != 0 && owned) {
             UnloadTexture(texture); /* registry full: do not leak the upload */
         }
         return (mye_texture){ 0 };
@@ -146,11 +151,47 @@ static mye_texture claim_texture_slot(mye_asset_db *db, const char *key,
     slot->refcount = 1;
     slot->scope = db->scope;
     slot->texture = texture;
+    slot->owned = owned;
     copy_key(slot->key, key);
     ++db->textures_loaded_total;
 
     return (mye_texture){ .index = (uint32_t)index,
                           .generation = slot->generation };
+}
+
+static mye_texture claim_texture_slot(mye_asset_db *db, const char *key,
+                                      Texture2D texture)
+{
+    return claim_texture_slot_ex(db, key, texture, true);
+}
+
+mye_texture mye_texture_adopt(ecs_world_t *world, const char *name,
+                              Texture2D texture)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || name == NULL) {
+        return (mye_texture){ 0 };
+    }
+    /* Deliberately NOT the dedupe that mye_texture_load does. Sharing a slot
+     * is right for a file, where the same path really is the same pixels; it
+     * is wrong here, because the caller is handing over a GPU texture it
+     * already owns. Deduping would return somebody else's texture -- the
+     * canvas would display an unrelated image -- and hand this caller's
+     * lifetime to a slot that may UnloadTexture it, or leave a handle the
+     * registry still calls valid after the real owner freed the GL name.
+     *
+     * A collision is malformed data, so it is reported rather than absorbed. */
+    if (find_texture_by_key(db, name) >= 0) {
+        mye_log_error("assets: '%s' is already a texture; an adopted texture "
+                      "needs a name of its own", name);
+        return (mye_texture){ 0 };
+    }
+
+    mye_texture handle = claim_texture_slot_ex(db, name, texture, false);
+    if (handle.generation == 0) {
+        mye_log_error("assets: no free texture slot to adopt '%s' into", name);
+    }
+    return handle;
 }
 
 mye_texture mye_texture_load(ecs_world_t *world, const char *path)
@@ -267,7 +308,7 @@ void mye_texture_release(ecs_world_t *world, mye_texture handle)
         return; /* someone else still holds it */
     }
 
-    if (slot->texture.id != 0) {
+    if (slot->texture.id != 0 && slot->owned) {
         UnloadTexture(slot->texture);
     }
     slot->state = ASSET_EMPTY;
@@ -776,7 +817,7 @@ static void assets_fini(ecs_world_t *world, void *ctx)
 
     for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
         if (db->textures[i].state == ASSET_LOADED &&
-            db->textures[i].texture.id != 0) {
+            db->textures[i].texture.id != 0 && db->textures[i].owned) {
             UnloadTexture(db->textures[i].texture);
         }
     }

@@ -7,6 +7,7 @@
 #include "audio/audio.h"
 #include "input/input.h"
 #include "render/camera.h"
+#include "render/canvas.h"
 #include "render/render2d.h"
 #include "render/render3d.h"
 #include "scene/scene.h"
@@ -98,6 +99,7 @@ static void MyeTimeUpdate(ecs_iter_t *it)
 
 ecs_entity_t MyeOnFixedUpdate = 0;
 ecs_entity_t MyeOnCamera = 0;
+ecs_entity_t MyeOnDrawCanvases = 0;
 ecs_entity_t MyeOnDraw3D = 0;
 ecs_entity_t MyeOnDraw2D = 0;
 ecs_entity_t MyeOnDrawUI = 0;
@@ -115,9 +117,14 @@ static void create_render_phases(ecs_world_t *world)
     MyeOnCamera = ecs_entity(world, {
         .name = "MyeOnCamera",
         .add = ecs_ids(EcsPhase, ecs_dependson(EcsOnStore)) });
+    /* Canvases render before the window, so a sprite or mesh that displays a
+     * canvas shows THIS frame's contents rather than last frame's. */
+    MyeOnDrawCanvases = ecs_entity(world, {
+        .name = "MyeOnDrawCanvases",
+        .add = ecs_ids(EcsPhase, ecs_dependson(MyeOnCamera)) });
     MyeOnDraw3D = ecs_entity(world, {
         .name = "MyeOnDraw3D",
-        .add = ecs_ids(EcsPhase, ecs_dependson(MyeOnCamera)) });
+        .add = ecs_ids(EcsPhase, ecs_dependson(MyeOnDrawCanvases)) });
     MyeOnDraw2D = ecs_entity(world, {
         .name = "MyeOnDraw2D",
         .add = ecs_ids(EcsPhase, ecs_dependson(MyeOnDraw3D)) });
@@ -307,6 +314,7 @@ ecs_world_t *mye_init(const mye_config *config)
      * renderers only call into this module at runtime, so nothing needs it
      * earlier. */
     ECS_IMPORT(world, MyeCameraModule);
+    ECS_IMPORT(world, MyeCanvasModule);
     ECS_IMPORT(world, MyeDebugOverlayModule);
 
     return world;

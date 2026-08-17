@@ -46,12 +46,13 @@ extern ecs_entity_t MyeOnFixedUpdate;
 
 /* The frame's draw order, as an explicit chain of phases:
  *
- *   EcsOnStore      BeginDrawing + clear        (engine)
- *   MyeOnCamera     follow / orbit systems      (engine + game)
- *   MyeOnDraw3D     world-space 3D pass         (render3d)
- *   MyeOnDraw2D     world-space sprite pass     (render2d)
- *   MyeOnDrawUI     screen-space HUD and menus  (game)
- *   MyeOnRenderEnd  EndDrawing                  (engine)
+ *   EcsOnStore        BeginDrawing + clear      (engine)
+ *   MyeOnCamera       follow / orbit systems    (engine + game)
+ *   MyeOnDrawCanvases off-screen canvases       (canvas)
+ *   MyeOnDraw3D       world-space 3D pass       (render3d)
+ *   MyeOnDraw2D       world-space sprite pass   (render2d)
+ *   MyeOnDrawUI       screen-space HUD and menus (game)
+ *   MyeOnRenderEnd    EndDrawing                (engine)
  *
  * Phases rather than registration order, so a module or game can register a
  * draw system at any time and still land in the right place. 3D draws first
@@ -63,6 +64,9 @@ extern ecs_entity_t MyeOnFixedUpdate;
  * logic belongs here, not in EcsOnUpdate where the target has not moved yet
  * -- see render/camera.h. */
 extern ecs_entity_t MyeOnCamera;
+/* Canvases draw here, before the window's passes: whatever displays a canvas
+ * then shows this frame's contents. See render/canvas.h. */
+extern ecs_entity_t MyeOnDrawCanvases;
 extern ecs_entity_t MyeOnDraw3D;
 extern ecs_entity_t MyeOnDraw2D;
 extern ecs_entity_t MyeOnDrawUI;

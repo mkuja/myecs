@@ -102,8 +102,11 @@ bool mye_camera3d_resolve(const ecs_world_t *world, ecs_entity_t camera,
 bool mye_camera2d_resolve(const ecs_world_t *world, ecs_entity_t camera,
                           Camera2D *out);
 
-/* The lowest-order active camera -- the "main view" by convention, and what
- * the screen/world helpers below use. False when there is none: the 3D pass
+/* The lowest-order active camera RENDERING TO THE WINDOW -- the "main view"
+ * by convention, and what the screen/world helpers below use. A camera that
+ * renders into a canvas is never "the main view", however low its order:
+ * picking against a minimap's camera would silently give answers in the
+ * wrong space. False when there is none: the 3D pass
  * then draws nothing and the 2D pass falls back to an identity view.
  * `out_entity` may be NULL.
  *
@@ -125,6 +128,15 @@ bool mye_camera2d_active(const ecs_world_t *world, Camera2D *out,
 int mye_camera3d_collect(const ecs_world_t *world, ecs_entity_t *out, int max);
 int mye_camera2d_collect(const ecs_world_t *world, ecs_entity_t *out, int max);
 
+/* The same, for cameras rendering into a particular canvas. `target` of 0
+ * means the window, so the two calls above are these with 0. A camera whose
+ * target is not a live canvas is counted as a window camera, and warns
+ * once -- that is malformed data rather than a choice. */
+int mye_camera3d_collect_for(const ecs_world_t *world, ecs_entity_t target,
+                             ecs_entity_t *out, int max);
+int mye_camera2d_collect_for(const ecs_world_t *world, ecs_entity_t target,
+                             ecs_entity_t *out, int max);
+
 /* The camera whose viewport contains a screen point, or 0. Split-screen
  * picking needs this: a click in player two's half read against player one's
  * camera silently lands somewhere else in the world. */
@@ -132,6 +144,17 @@ ecs_entity_t mye_camera_at_screen(const ecs_world_t *world, Vector2 screen);
 
 /* The rect a camera draws into, resolving "zero means the whole window". */
 Rectangle mye_camera_viewport(const ecs_world_t *world, ecs_entity_t camera);
+
+/* The pixel size of what a camera renders onto: a canvas, or the window at
+ * its current size.
+ *
+ * This is passed explicitly to the begin functions rather than asked of rlgl,
+ * because rlgl's framebuffer size is written by raylib's BeginTextureMode and
+ * by nothing else -- not by EndTextureMode, not by a window resize. Reading it
+ * would leave the window's viewport flipped against a stale height after
+ * either, sliding everything the game draws off its true position. */
+typedef struct MyeSurface { int width, height; } MyeSurface;
+MyeSurface mye_camera_surface(const ecs_world_t *world, ecs_entity_t target);
 
 /* ---------------------------------------------------- drawing through one -- */
 
@@ -142,12 +165,26 @@ Rectangle mye_camera_viewport(const ecs_world_t *world, ecs_entity_t camera);
  * rect, which reads as a layout bug rather than a camera one.
  *
  * Main thread only, between BeginDrawing and EndDrawing, like all drawing. */
-void mye_camera_begin_2d(Rectangle viewport, Camera2D camera);
+void mye_camera_begin_2d(Rectangle viewport, MyeSurface surface,
+                         Camera2D camera);
 void mye_camera_end_2d(void);
-/* `clear` wipes colour and depth inside the viewport first. Every camera
- * after the first needs it: the previous camera's depth values would
- * otherwise reject this one's fragments entirely. */
-void mye_camera_begin_3d(Rectangle viewport, Camera3D camera, bool clear);
+/* What a 3D camera wipes inside its viewport before drawing.
+ *
+ * Depth is not optional for any camera but the first: the previous camera's
+ * depth values are still there and silently reject this one's fragments --
+ * a view that renders nothing, with no error and no clue.
+ *
+ * Colour is separable, and has to be, because a canvas with `clear = false`
+ * accumulates: it wants this frame's meshes composited over last frame's
+ * picture, which means a fresh depth buffer and an untouched colour one. */
+typedef enum MyeCameraClear {
+    MYE_CAMERA_CLEAR_NONE,  /* the target was just cleared by its owner */
+    MYE_CAMERA_CLEAR_DEPTH, /* keep the colour already there, reset depth */
+    MYE_CAMERA_CLEAR_ALL,
+} MyeCameraClear;
+
+void mye_camera_begin_3d(Rectangle viewport, MyeSurface surface,
+                         Camera3D camera, MyeCameraClear clear);
 void mye_camera_end_3d(void);
 
 /* --------------------------------------------------------------- spawning -- */

@@ -16,6 +16,7 @@
 #include "input/input.h"
 #include "render/render2d.h"
 #include "render/camera.h"
+#include "render/canvas.h"
 #include "render/render3d.h"
 #include "scene/transform.h"
 
@@ -43,6 +44,7 @@ typedef struct ShowcaseState {
     ecs_entity_t pivot;
     ecs_entity_t fox;
     ecs_entity_t boombox;
+    ecs_entity_t minimap_canvas;
 
     float orbit_angle;
     float orbit_distance;
@@ -174,6 +176,22 @@ static void DrawHud(ecs_iter_t *it)
         DrawText(line, 20, 20, 20, RAYWHITE);
     }
 
+    /* The minimap canvas, drawn into the corner with a border. The canvas
+     * was rendered earlier this frame, in MyeOnDrawCanvases -- before any of
+     * the window's own passes -- so this is THIS frame's view, not last
+     * frame's. mye_canvas_source_rect carries the vertical flip that render
+     * textures need, so the picture is the right way up. */
+    const Texture2D *minimap =
+        mye_texture_get(world, mye_canvas_texture(world,
+                                                  state->minimap_canvas));
+    if (minimap != NULL) {
+        Rectangle where = { SCREEN_W - 260.0f, 20.0f, 240.0f, 240.0f };
+        DrawTexturePro(*minimap,
+                       mye_canvas_source_rect(world, state->minimap_canvas),
+                       where, (Vector2){ 0.0f, 0.0f }, 0.0f, WHITE);
+        DrawRectangleLinesEx(where, 2.0f, (Color){ 200, 200, 210, 255 });
+    }
+
     DrawText("1/2/3 animation - P shading - arrows orbit - Q/E height - "
              "SPACE pause",
              20, SCREEN_H - 34, 18, (Color){ 200, 200, 210, 255 });
@@ -220,18 +238,45 @@ int main(void)
                                        (Vector3){ 0.0f, 40.0f, 0.0f }, 50.0f);
     mye_set_parent(world, state->camera, state->pivot);
 
-    /* A minimap: a second camera looking straight down, drawn on top in a
-     * corner. Nothing else about it is special -- there is no "main" camera
-     * to declare, because every active camera draws.
-*/
+    /* A minimap: a second camera looking straight down. Nothing about it is
+     * special -- there is no "main" camera to declare, because every active
+     * camera draws.
+     *
+     * Rather than give it a corner viewport on the window, it renders into a
+     * CANVAS: an off-screen surface whose result is an ordinary texture. That
+     * costs one extra line here and buys the two things below -- the same
+     * camera's output appears in the HUD *and* on a screen inside the world,
+     * from one render. */
+    state->minimap_canvas = mye_canvas_create(world, "showcase:minimap", 256,
+                                              256, (Color){ 12, 14, 20, 255 });
+    if (state->minimap_canvas == 0) {
+        mye_log_error("showcase: no minimap canvas; continuing without one");
+    }
+
     ecs_entity_t minimap = mye_camera3d_spawn(world,
                                               (Vector3){ 0.0f, 320.0f, 0.0f },
                                               (Vector3){ 0.0f, 40.0f, 0.0f },
                                               45.0f);
     MyeCamera3D *map = ecs_get_mut(world, minimap, MyeCamera3D);
-    map->order = 1;
-    map->viewport = (Rectangle){ 1280.0f - 260.0f, 20.0f, 240.0f, 240.0f };
+    map->target = state->minimap_canvas;
     ecs_modified(world, minimap, MyeCamera3D);
+
+    /* Display #1, inside the 3D world: a "monitor" standing at the edge of
+     * the scene showing the minimap feed. A canvas on a mesh is mirrored
+     * unless the mesh's UVs are authored for it -- a source rect flips a
+     * sprite, UVs cannot be flipped from here -- so this is a plain cube and
+     * the mirroring is accepted rather than hidden. */
+    mye_model monitor = mye_model_from_mesh(world, "showcase:monitor",
+                                            GenMeshCube(80.0f, 80.0f, 3.0f),
+                                            WHITE);
+    ecs_entity_t screen = mye_mesh_spawn(world, monitor,
+                                         (Vector3){ -150.0f, 95.0f, -20.0f },
+                                         WHITE);
+    MyeMeshInstance *screen_mesh = ecs_get_mut(world, screen, MyeMeshInstance);
+    screen_mesh->texture = mye_canvas_texture(world, state->minimap_canvas);
+    ecs_modified(world, screen, MyeMeshInstance);
+
+    /* Display #2 is in DrawHud: the same canvas as a HUD sprite. */
 
     /* --- the assets ---------------------------------------------------- */
     char fox_path[1024];

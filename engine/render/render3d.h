@@ -34,7 +34,31 @@ typedef struct MyeModelAnimator {
 /* A model drawn at the entity's world transform. */
 typedef struct MyeMeshInstance {
     mye_model model;
+
+    /* Multiplies the model's own material colour, per instance: WHITE draws
+     * the model as authored. Instances sharing a model do not affect each
+     * other -- the draw pass restores the material after each mesh, because
+     * raylib's Material aliases the model's map array rather than copying
+     * it. */
     Color tint;
+
+    /* Optional: replaces the model's own diffuse texture on every mesh, for
+     * this instance only. Zero (the default) keeps the model's material as
+     * authored. This is how a canvas ends up on a surface -- a monitor, a
+     * dashboard minimap, a portal:
+     *
+     *   ecs_set(world, screen, MyeMeshInstance,
+     *           { .model = quad, .tint = WHITE,
+     *             .texture = mye_canvas_texture(world, canvas) });
+     *
+     * Note it is applied to ALL of the model's meshes, which is what a
+     * single-surface model wants; a multi-part model needs one entity per
+     * part. And a canvas on a mesh appears vertically mirrored unless the
+     * mesh's UVs are authored for it: a source rect can flip a sprite, UVs
+     * cannot be flipped from here. GenMeshPlane and GenMeshCube are fine as
+     * long as you accept the mirroring or flip the mesh with a negative
+     * scale. */
+    mye_texture texture;
 } MyeMeshInstance;
 
 /* Marks an entity as a 3D camera. Where it is and which way it faces come
@@ -54,6 +78,11 @@ typedef struct MyeCamera3D {
     /* Draw order among cameras. Higher draws later, so a minimap at order 1
      * lands on top of a world view at order 0. Ties keep entity order. */
     int order;
+
+    /* Which canvas this camera renders into: a MyeCanvas entity, or 0 for
+     * the window. Its viewport is then in that canvas's pixels. See
+     * render/canvas.h. */
+    ecs_entity_t target;
 } MyeCamera3D;
 
 /* A directional light. Several may exist; the shader takes the first
@@ -89,6 +118,13 @@ extern ECS_COMPONENT_DECLARE(MyeLight);
 extern ECS_COMPONENT_DECLARE(MyeRender3dConfig);
 
 void MyeRender3dModuleImport(ecs_world_t *world);
+
+/* Draws every 3D camera whose target is `target` (0 = the window). The
+ * canvas module calls this per canvas; the window's own pass calls it with
+ * 0. `already_cleared` lets the first camera composite onto a target its
+ * owner has just cleared. Main thread, inside a draw phase. */
+void mye_render3d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
+                                   bool already_cleared);
 
 /* Spawns an entity with a mesh and the transform components it needs. */
 ecs_entity_t mye_mesh_spawn(ecs_world_t *world, mye_model model,

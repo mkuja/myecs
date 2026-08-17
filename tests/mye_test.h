@@ -109,11 +109,24 @@ typedef struct mye_test_entry {
                       mye_e_ ? mye_e_ : "(null)", mye_a_ ? mye_a_ : "(null)"); \
     } while (0)
 
-static inline int mye_test_run_all(const mye_test_entry *tests, size_t count)
+/* `filter`, when not NULL, runs only the tests whose name contains it.
+ *
+ * This exists because a failing test returns from its body immediately --
+ * before any cleanup it was going to do -- and a test that leaves a window or
+ * an audio device open can abort the PROCESS when the next test initialises
+ * one. The remaining tests then never run and no summary is printed, so one
+ * failure hides every result after it, which is precisely when you most want
+ * to see them. Running a single test by name sidesteps that, and makes
+ * mutation-checking a specific test reliable. */
+static inline int mye_test_run_all(const mye_test_entry *tests, size_t count,
+                                   const char *filter)
 {
     size_t passed = 0, failed = 0, skipped = 0;
 
     for (size_t i = 0; i < count; ++i) {
+        if (filter != NULL && strstr(tests[i].name, filter) == NULL) {
+            continue;
+        }
         mye_test_ctx ctx = { .failed = false, .skipped = false };
         fprintf(stderr, "RUN  %s\n", tests[i].name);
         tests[i].fn(&ctx);
@@ -132,12 +145,15 @@ static inline int mye_test_run_all(const mye_test_entry *tests, size_t count)
     return failed == 0 ? 0 : 1;
 }
 
+/* An optional argv[1] runs only the tests whose name contains it:
+ *     ./tests/test_int_render_cameras canvas_on_a_mesh */
 #define TEST_MAIN(...)                                                         \
-    int main(void)                                                             \
+    int main(int argc, char **argv)                                            \
     {                                                                          \
         static const mye_test_entry mye_tests_[] = { __VA_ARGS__ };            \
         return mye_test_run_all(mye_tests_,                                    \
-                                sizeof mye_tests_ / sizeof mye_tests_[0]);     \
+                                sizeof mye_tests_ / sizeof mye_tests_[0],      \
+                                argc > 1 ? argv[1] : NULL);                    \
     }
 
 #endif /* MYE_TEST_H */
