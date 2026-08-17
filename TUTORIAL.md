@@ -731,6 +731,16 @@ camera's **own** position land this frame; writes to something the camera is
 *parented to* land next frame, because transforms were already propagated.
 Move rigs in `EcsOnUpdate`; move cameras in `MyeOnCamera`.
 
+### One consequence of cameras being ordinary entities
+
+A camera has `MyePosition2D`/`3D` and `MyeRotation2D`/`3D` like anything
+else — so a system that queries "everything with a rotation" will happily
+spin your camera too. That is not a bug in the engine; it is the query being
+broader than you meant. Match on a tag of your own (`[none] Spins`) rather
+than on the transform components, and the camera stays out of it. The
+showcase example had exactly this bug: its minimap camera was being yawed to
+the horizon sixty times a second by a system meant for a boombox.
+
 ### Rigid attachment is just parenting
 
 For a camera that is genuinely welded to something — a first-person view, a

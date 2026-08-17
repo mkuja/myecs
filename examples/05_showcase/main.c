@@ -118,6 +118,14 @@ static void CameraControl(ecs_iter_t *it)
     }
 }
 
+/* Spins the boombox. Matched by a tag, NOT by "everything with a rotation":
+ * cameras are ordinary entities in the hierarchy and carry MyeRotation3D too,
+ * so a bare MyeRotation3D query would spin them as well -- which is exactly
+ * what happened, and it aimed the minimap camera at the horizon every step
+ * while the main camera was rescued only by being re-aimed each frame. */
+typedef struct Spins { char unused; } Spins;
+ECS_COMPONENT_DECLARE(Spins);
+
 static void SpinBoomBox(ecs_iter_t *it)
 {
     MyeRotation3D *rot = ecs_field(it, MyeRotation3D, 0);
@@ -186,6 +194,7 @@ int main(void)
     }
 
     ECS_COMPONENT_DEFINE(world, ShowcaseState);
+    ECS_COMPONENT_DEFINE(world, Spins);
     ecs_add_id(world, ecs_id(ShowcaseState), EcsSingleton);
 
     mye_input_bind_axis_keys(world, ACT_ORBIT, KEY_LEFT, KEY_RIGHT);
@@ -214,14 +223,7 @@ int main(void)
     /* A minimap: a second camera looking straight down, drawn on top in a
      * corner. Nothing else about it is special -- there is no "main" camera
      * to declare, because every active camera draws.
-     *
-     * KNOWN GAP: in this example the corner is drawn (its clear lands) but
-     * the fox and boombox do not appear in it, while the same second-camera
-     * setup renders correctly in tests/integration/test_int_render_cameras.c
-     * -- including with this exact geometry. Not yet understood; the
-     * discriminating fact is that a plain sphere spawned in THIS scene also
-     * fails to draw for either camera, so it is something about this
-     * scene's setup rather than the camera pass. */
+*/
     ecs_entity_t minimap = mye_camera3d_spawn(world,
                                               (Vector3){ 0.0f, 320.0f, 0.0f },
                                               (Vector3){ 0.0f, 40.0f, 0.0f },
@@ -280,6 +282,7 @@ int main(void)
                                         WHITE);
         ecs_set(world, state->boombox, MyeScale3D,
                 { { 900.0f, 900.0f, 900.0f } });
+        ecs_add(world, state->boombox, Spins);
     }
 
     /* Bright key light: PBR highlights need something to reflect. */
@@ -297,7 +300,7 @@ int main(void)
               .intensity = 1.0f,
               .enabled = true });
 
-    ECS_SYSTEM(world, SpinBoomBox, MyeOnFixedUpdate, MyeRotation3D);
+    ECS_SYSTEM(world, SpinBoomBox, MyeOnFixedUpdate, MyeRotation3D, [none] Spins);
     /* EcsOnUpdate, not MyeOnCamera: this system moves the camera's PARENT (the
      * pivot). Writes to a parent must land before transform propagation, or
      * they show up a frame late. MyeOnCamera is for systems that read other
