@@ -211,6 +211,26 @@ int main(void)
                                        (Vector3){ 0.0f, 40.0f, 0.0f }, 50.0f);
     mye_set_parent(world, state->camera, state->pivot);
 
+    /* A minimap: a second camera looking straight down, drawn on top in a
+     * corner. Nothing else about it is special -- there is no "main" camera
+     * to declare, because every active camera draws.
+     *
+     * KNOWN GAP: in this example the corner is drawn (its clear lands) but
+     * the fox and boombox do not appear in it, while the same second-camera
+     * setup renders correctly in tests/integration/test_int_render_cameras.c
+     * -- including with this exact geometry. Not yet understood; the
+     * discriminating fact is that a plain sphere spawned in THIS scene also
+     * fails to draw for either camera, so it is something about this
+     * scene's setup rather than the camera pass. */
+    ecs_entity_t minimap = mye_camera3d_spawn(world,
+                                              (Vector3){ 0.0f, 320.0f, 0.0f },
+                                              (Vector3){ 0.0f, 40.0f, 0.0f },
+                                              45.0f);
+    MyeCamera3D *map = ecs_get_mut(world, minimap, MyeCamera3D);
+    map->order = 1;
+    map->viewport = (Rectangle){ 1280.0f - 260.0f, 20.0f, 240.0f, 240.0f };
+    ecs_modified(world, minimap, MyeCamera3D);
+
     /* --- the assets ---------------------------------------------------- */
     char fox_path[1024];
     char boombox_path[1024];

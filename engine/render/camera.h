@@ -81,6 +81,11 @@ typedef struct MyeCameraFollow {
 
 extern ECS_COMPONENT_DECLARE(MyeCameraFollow);
 
+/* How many active cameras one pass will draw. Split screen wants four, a
+ * minimap one more; sixteen is far past any real layout and keeps the
+ * per-frame array on the stack. */
+#define MYE_MAX_DRAWN_CAMERAS 16
+
 void MyeCameraModuleImport(ecs_world_t *world);
 
 /* ------------------------------------------------------------- resolving -- */
@@ -97,19 +102,53 @@ bool mye_camera3d_resolve(const ecs_world_t *world, ecs_entity_t camera,
 bool mye_camera2d_resolve(const ecs_world_t *world, ecs_entity_t camera,
                           Camera2D *out);
 
-/* The camera the built-in pass looks through: the one named in
- * MyeRender3dConfig.camera / MyeRenderConfig.camera, else the first active
- * one. False when there is none: the 3D pass then draws nothing, and the 2D
- * pass falls back to an identity view. `out_entity` may be NULL.
+/* The lowest-order active camera -- the "main view" by convention, and what
+ * the screen/world helpers below use. False when there is none: the 3D pass
+ * then draws nothing and the 2D pass falls back to an identity view.
+ * `out_entity` may be NULL.
  *
- * A game may have any number of cameras -- a main view, a minimap, a
- * cutscene rig on standby. That is its business; the engine picks nothing
- * and warns about nothing beyond honouring the config field. The other
- * cameras are the game's to draw with, through mye_camera3d_resolve. */
+ * Note this is a convenience, not a selection: EVERY active camera is drawn
+ * (see mye_camera3d_collect). How many cameras a game has, and what they are
+ * for, is the game's business. */
 bool mye_camera3d_active(const ecs_world_t *world, Camera3D *out,
                          ecs_entity_t *out_entity);
 bool mye_camera2d_active(const ecs_world_t *world, Camera2D *out,
                          ecs_entity_t *out_entity);
+
+/* Every active camera of one dimensionality, sorted by `order` (stable, so
+ * equal orders keep entity order). Writes at most `max` and returns how many
+ * -- if that clips, the extra cameras simply are not drawn, which is
+ * reported once rather than silently.
+ *
+ * This is what the built-in passes iterate: there is no chosen camera, so a
+ * minimap or a split screen is a second camera entity and nothing else. */
+int mye_camera3d_collect(const ecs_world_t *world, ecs_entity_t *out, int max);
+int mye_camera2d_collect(const ecs_world_t *world, ecs_entity_t *out, int max);
+
+/* The camera whose viewport contains a screen point, or 0. Split-screen
+ * picking needs this: a click in player two's half read against player one's
+ * camera silently lands somewhere else in the world. */
+ecs_entity_t mye_camera_at_screen(const ecs_world_t *world, Vector2 screen);
+
+/* The rect a camera draws into, resolving "zero means the whole window". */
+Rectangle mye_camera_viewport(const ecs_world_t *world, ecs_entity_t camera);
+
+/* ---------------------------------------------------- drawing through one -- */
+
+/* raylib's BeginMode2D/3D always use the whole window, so these do the same
+ * job against a viewport rect: set the GL viewport and scissor, build the
+ * projection with THAT rect's aspect, and apply the view. Ending restores
+ * the full window -- forget that and the HUD inherits the last camera's
+ * rect, which reads as a layout bug rather than a camera one.
+ *
+ * Main thread only, between BeginDrawing and EndDrawing, like all drawing. */
+void mye_camera_begin_2d(Rectangle viewport, Camera2D camera);
+void mye_camera_end_2d(void);
+/* `clear` wipes colour and depth inside the viewport first. Every camera
+ * after the first needs it: the previous camera's depth values would
+ * otherwise reject this one's fragments entirely. */
+void mye_camera_begin_3d(Rectangle viewport, Camera3D camera, bool clear);
+void mye_camera_end_3d(void);
 
 /* --------------------------------------------------------------- spawning -- */
 

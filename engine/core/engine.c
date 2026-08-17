@@ -361,23 +361,10 @@ bool mye_progress(ecs_world_t *world, float dt)
     /* Everything else: EcsPreFrame .. EcsOnStore, rendering included. */
     bool result = ecs_progress(world, dt);
 
-    /* Capture the last frame if asked. After ecs_progress, so EndDrawing has
-     * run and the back buffer holds a complete frame. */
-    if (engine->screenshot_path != NULL && engine->window_open &&
-        engine->max_frames > 0) {
-        const MyeTime *now = ecs_singleton_get(world, MyeTime);
-        if (now != NULL && now->frame >= engine->max_frames) {
-            /* Not TakeScreenshot(): that prepends raylib's basePath, which
-             * mangles an absolute path. Grab the pixels and export them
-             * ourselves so the path is used verbatim. */
-            Image shot = LoadImageFromScreen();
-            if (shot.data != NULL) {
-                ExportImage(shot, engine->screenshot_path);
-                UnloadImage(shot);
-            }
-            engine->screenshot_path = NULL; /* once only */
-        }
-    }
+    /* The end-of-run screenshot is taken by MyeRenderEnd, inside the frame
+     * before the buffer swap. Reading after ecs_progress -- as this used to
+     * -- gets the back buffer after the swap, which is the PREVIOUS frame on
+     * most drivers. */
 
     return result;
 }

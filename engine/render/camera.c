@@ -6,6 +6,7 @@
 #include "render/render3d.h"
 
 #include <raymath.h>
+#include <rlgl.h>
 
 ECS_COMPONENT_DECLARE(MyeCameraFollow);
 
@@ -16,9 +17,12 @@ typedef struct MyeCameraState {
     ecs_query_t *cameras3d;
     ecs_query_t *cameras2d;
     bool warned_bare_parent;
+    bool warned_too_many;
 } MyeCameraState;
 
 ECS_COMPONENT_DECLARE(MyeCameraState);
+
+static void screen_size(const ecs_world_t *world, int *width, int *height);
 
 /* Const in, mutable out: the queries live here and iterating one is not a
  * logical mutation of the world, but flecs has no const query handle. The
@@ -163,31 +167,123 @@ bool mye_camera2d_resolve(const ecs_world_t *world, ecs_entity_t camera,
     return true;
 }
 
-/* Which camera the built-in pass looks through: the one the game named in
- * its render config, else the first active one. Several cameras is a normal
- * thing to have -- a main view and a minimap -- so more than one is not a
- * condition to warn about; it is a reason to set the config field. */
-static ecs_entity_t view_camera(const ecs_world_t *world, ecs_query_t *query,
-                                ecs_entity_t configured, bool is_3d)
+/* The draw order of a camera, whichever dimensionality it is. */
+static int camera_order(const ecs_world_t *world, ecs_entity_t camera,
+                        bool is_3d)
 {
-    if (configured != 0 && ecs_is_alive(world, configured)) {
-        return configured;
+    if (is_3d) {
+        const MyeCamera3D *c = ecs_get(world, camera, MyeCamera3D);
+        return c != NULL ? c->order : 0;
     }
-    if (query == NULL) {
+    const MyeCamera2D *c = ecs_get(world, camera, MyeCamera2D);
+    return c != NULL ? c->order : 0;
+}
+
+/* Every active camera, sorted by order. Insertion sort: the count is a
+ * handful, and it is stable, so equal orders keep entity order and the
+ * picture does not shuffle between frames. */
+static int collect(const ecs_world_t *world, ecs_query_t *query, bool is_3d,
+                   ecs_entity_t *out, int max)
+{
+    if (query == NULL || out == NULL || max <= 0) {
         return 0;
     }
+
+    int count = 0;
+    bool clipped = false;
 
     ecs_iter_t it = ecs_query_iter(world, query);
     while (ecs_query_next(&it)) {
         for (int i = 0; i < it.count; ++i) {
-            bool active = is_3d
-                              ? ecs_field(&it, MyeCamera3D, 0)[i].active
-                              : ecs_field(&it, MyeCamera2D, 0)[i].active;
-            if (active) {
-                ecs_entity_t found = it.entities[i];
-                ecs_iter_fini(&it);
-                return found;
+            bool active = is_3d ? ecs_field(&it, MyeCamera3D, 0)[i].active
+                                : ecs_field(&it, MyeCamera2D, 0)[i].active;
+            if (!active) {
+                continue;
             }
+            if (count >= max) {
+                clipped = true;
+                continue;
+            }
+
+            out[count] = it.entities[i];
+            ++count;
+        }
+    }
+
+    /* Sorted after the iteration, not during it: ordering needs ecs_get on
+     * other entities, and doing that inside an open query iteration is what
+     * broke this the first time. */
+    for (int i = 1; i < count; ++i) {
+        ecs_entity_t moving = out[i];
+        int order = camera_order(world, moving, is_3d);
+        int at = i;
+        while (at > 0 && camera_order(world, out[at - 1], is_3d) > order) {
+            out[at] = out[at - 1];
+            --at;
+        }
+        out[at] = moving;
+    }
+
+    if (clipped) {
+        MyeCameraState *state = camera_state(world);
+        if (state != NULL && !state->warned_too_many) {
+            state->warned_too_many = true;
+            mye_log_warn("camera: more than %d active cameras; the rest are "
+                         "not drawn", max);
+        }
+    }
+    return count;
+}
+
+int mye_camera3d_collect(const ecs_world_t *world, ecs_entity_t *out, int max)
+{
+    MyeCameraState *state = camera_state(world);
+    return state != NULL ? collect(world, state->cameras3d, true, out, max) : 0;
+}
+
+int mye_camera2d_collect(const ecs_world_t *world, ecs_entity_t *out, int max)
+{
+    MyeCameraState *state = camera_state(world);
+    return state != NULL ? collect(world, state->cameras2d, false, out, max) : 0;
+}
+
+Rectangle mye_camera_viewport(const ecs_world_t *world, ecs_entity_t camera)
+{
+    Rectangle vp = { 0 };
+    const MyeCamera3D *c3 = ecs_get(world, camera, MyeCamera3D);
+    const MyeCamera2D *c2 = c3 == NULL ? ecs_get(world, camera, MyeCamera2D)
+                                       : NULL;
+    if (c3 != NULL) {
+        vp = c3->viewport;
+    } else if (c2 != NULL) {
+        vp = c2->viewport;
+    }
+
+    if (vp.width <= 0.0f || vp.height <= 0.0f) {
+        int width, height;
+        screen_size(world, &width, &height);
+        vp = (Rectangle){ 0.0f, 0.0f, (float)width, (float)height };
+    }
+    return vp;
+}
+
+ecs_entity_t mye_camera_at_screen(const ecs_world_t *world, Vector2 screen)
+{
+    /* Highest order first: the topmost camera at that pixel is the one the
+     * player thinks they clicked on. */
+    ecs_entity_t cameras[MYE_MAX_DRAWN_CAMERAS];
+    int count = mye_camera2d_collect(world, cameras, MYE_MAX_DRAWN_CAMERAS);
+    for (int i = count - 1; i >= 0; --i) {
+        if (CheckCollisionPointRec(screen,
+                                   mye_camera_viewport(world, cameras[i]))) {
+            return cameras[i];
+        }
+    }
+    count = mye_camera3d_collect(world, cameras, MYE_MAX_DRAWN_CAMERAS);
+    for (int i = count - 1; i >= 0; --i) {
+        if (CheckCollisionPointRec(screen,
+                                   mye_camera_viewport(world, cameras[i]))) {
+            return cameras[i];
         }
     }
     return 0;
@@ -200,10 +296,10 @@ bool mye_camera3d_active(const ecs_world_t *world, Camera3D *out,
     if (state == NULL) {
         return false;
     }
-    const MyeRender3dConfig *config =
-        ecs_singleton_get(world, MyeRender3dConfig);
-    ecs_entity_t e = view_camera(world, state->cameras3d,
-                                 config != NULL ? config->camera : 0, true);
+    (void)state;
+    ecs_entity_t cameras[MYE_MAX_DRAWN_CAMERAS];
+    int count = mye_camera3d_collect(world, cameras, MYE_MAX_DRAWN_CAMERAS);
+    ecs_entity_t e = count > 0 ? cameras[0] : 0;
     if (out_entity != NULL) {
         *out_entity = e;
     }
@@ -217,9 +313,10 @@ bool mye_camera2d_active(const ecs_world_t *world, Camera2D *out,
     if (state == NULL) {
         return false;
     }
-    const MyeRenderConfig *config = ecs_singleton_get(world, MyeRenderConfig);
-    ecs_entity_t e = view_camera(world, state->cameras2d,
-                                 config != NULL ? config->camera : 0, false);
+    (void)state;
+    ecs_entity_t cameras[MYE_MAX_DRAWN_CAMERAS];
+    int count = mye_camera2d_collect(world, cameras, MYE_MAX_DRAWN_CAMERAS);
+    ecs_entity_t e = count > 0 ? cameras[0] : 0;
     if (out_entity != NULL) {
         *out_entity = e;
     }
@@ -376,6 +473,117 @@ Vector2 mye_screen_to_world_2d(const ecs_world_t *world, Vector2 screen)
         return screen;
     }
     return GetScreenToWorld2D(screen, camera);
+}
+
+/* ---------------------------------------------------- drawing through one -- */
+
+/* GL's viewport origin is bottom-left; ours is top-left, like everything
+ * else on screen. */
+static void set_viewport(Rectangle vp)
+{
+    int screen_h = GetScreenHeight();
+    int x = (int)vp.x;
+    int y = screen_h - (int)(vp.y + vp.height);
+    int w = (int)vp.width;
+    int h = (int)vp.height;
+
+    rlViewport(x, y, w, h);
+    /* Scissor as well: the viewport confines the projection, not the pixels
+     * a clear or an oversized sprite can touch. */
+    rlEnableScissorTest();
+    rlScissor(x, y, w, h);
+}
+
+static void restore_viewport(void)
+{
+    rlDisableScissorTest();
+    rlViewport(0, 0, GetScreenWidth(), GetScreenHeight());
+}
+
+void mye_camera_begin_3d(Rectangle viewport, Camera3D camera, bool clear)
+{
+    rlDrawRenderBatchActive();
+    set_viewport(viewport);
+
+    /* Every camera after the first must clear its own patch, or the previous
+     * camera's DEPTH values are still there and silently reject everything
+     * this one draws -- a minimap that renders nothing, with no error and no
+     * clue. glClear obeys the scissor box, so this clears the viewport only.
+     *
+     * Colour goes with it, which makes a viewport camera opaque: a minimap
+     * covers what is under it rather than blending into it. Two cameras
+     * sharing a rect therefore paint over each other, newest last. */
+    if (clear) {
+        rlClearScreenBuffers();
+    }
+
+    rlMatrixMode(RL_PROJECTION);
+    rlPushMatrix();
+    rlLoadIdentity();
+
+    /* The viewport's aspect, not the window's -- this is the whole reason
+     * raylib's BeginMode3D cannot be used for a sub-rect. */
+    double aspect = (double)viewport.width / (double)viewport.height;
+    double near_plane = rlGetCullDistanceNear();
+    double far_plane = rlGetCullDistanceFar();
+
+    double fovy = (double)camera.fovy;
+    if (camera.projection == CAMERA_ORTHOGRAPHIC) {
+        double top = fovy / 2.0;
+        rlOrtho(-top * aspect, top * aspect, -top, top, near_plane, far_plane);
+    } else {
+        double top = near_plane * tan(fovy * 0.5 * (double)DEG2RAD);
+        rlFrustum(-top * aspect, top * aspect, -top, top, near_plane,
+                  far_plane);
+    }
+
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    rlMultMatrixf(MatrixToFloat(
+        MatrixLookAt(camera.position, camera.target, camera.up)));
+
+    rlEnableDepthTest();
+}
+
+void mye_camera_end_3d(void)
+{
+    rlDrawRenderBatchActive();
+    rlMatrixMode(RL_PROJECTION);
+    rlPopMatrix();
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    rlDisableDepthTest();
+    restore_viewport();
+}
+
+void mye_camera_begin_2d(Rectangle viewport, Camera2D camera)
+{
+    rlDrawRenderBatchActive();
+    set_viewport(viewport);
+
+    /* raylib's screen-space projection covers the whole window, so with the
+     * GL viewport narrowed the whole window would be squeezed into the rect.
+     * Project the rect's own pixel extent instead, which also makes the
+     * camera's offset mean "within this viewport". */
+    rlMatrixMode(RL_PROJECTION);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlOrtho(0.0, (double)viewport.width, (double)viewport.height, 0.0, -1.0,
+            1.0);
+
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    rlMultMatrixf(MatrixToFloat(GetCameraMatrix2D(camera)));
+}
+
+void mye_camera_end_2d(void)
+{
+    rlDrawRenderBatchActive();
+    rlMatrixMode(RL_PROJECTION);
+    rlPopMatrix();
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    restore_viewport();
 }
 
 /* ------------------------------------------------------------- following -- */

@@ -94,9 +94,14 @@ typedef struct MyeHidden {
  * render/camera.h. The first one marked active is the one that draws. */
 typedef struct MyeCamera2D {
     float zoom;      /* 1 = one world unit per pixel; 0 is treated as 1 */
-    Vector2 offset;  /* where on screen the camera's position lands;
+    Vector2 offset;  /* where in its viewport the camera's position lands;
                         mye_camera2d_spawn defaults it to the centre */
     bool active;
+
+    /* As MyeCamera3D: a zero-sized rect means the whole window, and higher
+     * order draws later. */
+    Rectangle viewport;
+    int order;
 } MyeCamera2D;
 /* No rotation field: the view turns with the entity's MyeRotation2D and its
  * parents, like everything else. */
@@ -105,10 +110,6 @@ typedef struct MyeCamera2D {
 typedef struct MyeRenderConfig {
     Color clear_color;
 
-    /* The camera the built-in sprite pass looks through. 0 means "the first
-     * active one". With several cameras, set this to name the main view --
-     * see MyeRender3dConfig.camera. */
-    ecs_entity_t camera;
 } MyeRenderConfig;
 
 extern ECS_COMPONENT_DECLARE(MyeSprite);

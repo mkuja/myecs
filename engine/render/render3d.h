@@ -45,6 +45,15 @@ typedef struct MyeCamera3D {
     float fov;       /* vertical, degrees; 0 is treated as 60 */
     int projection;  /* CAMERA_PERSPECTIVE or CAMERA_ORTHOGRAPHIC */
     bool active;
+
+    /* Where on the window this camera draws, in pixels. A zero-sized rect
+     * means the whole window -- what a game with one camera wants, and never
+     * has to think about. A minimap is a corner rect. */
+    Rectangle viewport;
+
+    /* Draw order among cameras. Higher draws later, so a minimap at order 1
+     * lands on top of a world view at order 0. Ties keep entity order. */
+    int order;
 } MyeCamera3D;
 
 /* A directional light. Several may exist; the shader takes the first
@@ -71,12 +80,6 @@ typedef struct MyeRender3dConfig {
      * all of it and is cheaper. */
     bool use_pbr;
 
-    /* The camera the built-in 3D pass looks through. 0 means "the first
-     * active one", which is all a game with one camera needs. A game with
-     * several -- a main view and a minimap, say -- sets this to say which is
-     * the main view; the others are its own to draw with, through
-     * mye_camera3d_resolve. How many cameras exist is the game's business. */
-    ecs_entity_t camera;
 } MyeRender3dConfig;
 
 extern ECS_COMPONENT_DECLARE(MyeMeshInstance);

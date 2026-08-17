@@ -409,9 +409,8 @@ TEST(no_active_camera_is_reported_rather_than_guessed)
 }
 
 /* Several cameras is an ordinary thing to have -- a main view and a minimap.
- * The engine does not arbitrate: the game names the main view in its render
- * config, and nothing is said about the rest. */
-TEST(with_several_cameras_the_configured_one_is_the_view_and_nobody_complains)
+ * The engine draws all of them and arbitrates nothing. */
+TEST(every_active_camera_is_collected_in_order)
 {
     ecs_world_t *world = make_world();
     ASSERT_TRUE(world != NULL);
@@ -420,32 +419,108 @@ TEST(with_several_cameras_the_configured_one_is_the_view_and_nobody_complains)
         world, (Vector3){ 0.0f, 2.0f, 8.0f }, (Vector3){ 0.0f, 0.0f, 0.0f }, 60.0f);
     ecs_entity_t minimap = mye_camera3d_spawn(
         world, (Vector3){ 0.0f, 200.0f, 0.0f }, (Vector3){ 0.0f, 0.0f, 0.0f }, 30.0f);
-    (void)main_view;
+
+    /* The minimap draws on top, and into a corner. */
+    MyeCamera3D *m = ecs_get_mut(world, minimap, MyeCamera3D);
+    m->order = 1;
+    m->viewport = (Rectangle){ 1024.0f, 0.0f, 256.0f, 256.0f };
+    ecs_modified(world, minimap, MyeCamera3D);
     mye_progress(world, FIXED_DT);
 
     mye_log_counts before = mye_log_get_counts();
 
-    /* Nothing configured: the first active one, deterministically. */
-    ecs_entity_t who = 0;
-    Camera3D c;
-    ASSERT_TRUE(mye_camera3d_active(world, &c, &who));
-    ASSERT_TRUE(who == main_view);
+    ecs_entity_t got[MYE_MAX_DRAWN_CAMERAS];
+    ASSERT_EQ_INT(2, mye_camera3d_collect(world, got, MYE_MAX_DRAWN_CAMERAS));
+    ASSERT_TRUE(got[0] == main_view); /* order 0 first */
+    ASSERT_TRUE(got[1] == minimap);
 
-    /* Configured: that one, regardless of order. */
-    MyeRender3dConfig *config = ecs_singleton_ensure(world, MyeRender3dConfig);
-    config->camera = minimap;
-    ecs_singleton_modified(world, MyeRender3dConfig);
-    ASSERT_TRUE(mye_camera3d_active(world, &c, &who));
-    ASSERT_TRUE(who == minimap);
-    ASSERT_NEAR(200.0f, c.position.y, 0.001f);
+    /* Swapping the order swaps who is on top. */
+    m = ecs_get_mut(world, minimap, MyeCamera3D);
+    m->order = -1;
+    ecs_modified(world, minimap, MyeCamera3D);
+    ASSERT_EQ_INT(2, mye_camera3d_collect(world, got, MYE_MAX_DRAWN_CAMERAS));
+    ASSERT_TRUE(got[0] == minimap);
 
-    /* And the other camera is still resolvable for the game's own use. */
-    Camera3D other;
-    ASSERT_TRUE(mye_camera3d_resolve(world, main_view, &other));
-    ASSERT_NEAR(2.0f, other.position.y, 0.001f);
-
-    /* Not a warning in sight. */
+    /* Nothing to complain about: several cameras is not a mistake. */
     ASSERT_EQ_U64(before.warn, mye_log_get_counts().warn);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* A camera that never set a viewport covers the window -- the single-camera
+ * path, which must not require thinking about rects. */
+TEST(a_zero_viewport_means_the_whole_window)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t cam = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f }, 1.0f);
+    mye_progress(world, FIXED_DT);
+
+    Rectangle vp = mye_camera_viewport(world, cam);
+    ASSERT_NEAR(0.0f, vp.x, 0.001f);
+    ASSERT_NEAR(0.0f, vp.y, 0.001f);
+    ASSERT_NEAR(1280.0f, vp.width, 0.001f);
+    ASSERT_NEAR(720.0f, vp.height, 0.001f);
+
+    MyeCamera2D *c = ecs_get_mut(world, cam, MyeCamera2D);
+    c->viewport = (Rectangle){ 10.0f, 20.0f, 300.0f, 200.0f };
+    ecs_modified(world, cam, MyeCamera2D);
+    vp = mye_camera_viewport(world, cam);
+    ASSERT_NEAR(300.0f, vp.width, 0.001f);
+    ASSERT_NEAR(20.0f, vp.y, 0.001f);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* Split-screen picking: a click must be read against the camera it landed
+ * in, or player two's clicks are interpreted in player one's world. */
+TEST(a_screen_point_resolves_to_the_camera_whose_viewport_contains_it)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t left = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f }, 1.0f);
+    ecs_entity_t right = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f }, 1.0f);
+    MyeCamera2D *l = ecs_get_mut(world, left, MyeCamera2D);
+    l->viewport = (Rectangle){ 0.0f, 0.0f, 640.0f, 720.0f };
+    ecs_modified(world, left, MyeCamera2D);
+    MyeCamera2D *r = ecs_get_mut(world, right, MyeCamera2D);
+    r->viewport = (Rectangle){ 640.0f, 0.0f, 640.0f, 720.0f };
+    ecs_modified(world, right, MyeCamera2D);
+    mye_progress(world, FIXED_DT);
+
+    ASSERT_TRUE(mye_camera_at_screen(world, (Vector2){ 100.0f, 360.0f }) == left);
+    ASSERT_TRUE(mye_camera_at_screen(world, (Vector2){ 900.0f, 360.0f }) == right);
+    /* Outside every viewport: nothing, rather than a plausible wrong answer. */
+    ASSERT_TRUE(mye_camera_at_screen(world, (Vector2){ 100.0f, 900.0f }) == 0);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* An inactive camera is not drawn, but is still resolvable -- a cutscene rig
+ * on standby is a normal thing to keep around. */
+TEST(an_inactive_camera_is_not_collected_but_still_resolves)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t live = mye_camera3d_spawn(world, (Vector3){ 0.0f, 0.0f, 5.0f },
+                                           (Vector3){ 0.0f, 0.0f, 0.0f }, 60.0f);
+    ecs_entity_t standby = mye_camera3d_spawn(world, (Vector3){ 0.0f, 9.0f, 0.0f },
+                                              (Vector3){ 0.0f, 0.0f, 0.0f }, 60.0f);
+    MyeCamera3D *c = ecs_get_mut(world, standby, MyeCamera3D);
+    c->active = false;
+    ecs_modified(world, standby, MyeCamera3D);
+    mye_progress(world, FIXED_DT);
+
+    ecs_entity_t got[MYE_MAX_DRAWN_CAMERAS];
+    ASSERT_EQ_INT(1, mye_camera3d_collect(world, got, MYE_MAX_DRAWN_CAMERAS));
+    ASSERT_TRUE(got[0] == live);
+
+    Camera3D r;
+    ASSERT_TRUE(mye_camera3d_resolve(world, standby, &r));
+    ASSERT_NEAR(9.0f, r.position.y, 0.001f);
 
     ASSERT_EQ_INT(0, mye_shutdown(world));
 }
@@ -679,7 +754,10 @@ TEST_MAIN(TEST_CASE(a_root_camera_resolves_to_its_own_position_and_fov),
           TEST_CASE(screen_and_world_round_trip_through_a_2d_camera),
           TEST_CASE(a_camera_with_no_transform_components_still_resolves),
           TEST_CASE(no_active_camera_is_reported_rather_than_guessed),
-          TEST_CASE(with_several_cameras_the_configured_one_is_the_view_and_nobody_complains),
+          TEST_CASE(every_active_camera_is_collected_in_order),
+          TEST_CASE(a_zero_viewport_means_the_whole_window),
+          TEST_CASE(a_screen_point_resolves_to_the_camera_whose_viewport_contains_it),
+          TEST_CASE(an_inactive_camera_is_not_collected_but_still_resolves),
           TEST_CASE(render_position_blends_an_interpolated_sprite_outside_the_hierarchy),
           TEST_CASE(render_rotation_is_a_pure_rotation_even_for_a_scaled_entity),
           TEST_CASE(a_parented_follow_camera_lands_on_the_target_not_beside_it),

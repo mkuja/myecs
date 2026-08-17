@@ -7,6 +7,7 @@
 #include "core/log.h"
 
 #include <raymath.h>
+#include <rlgl.h>
 
 #include <stdio.h>
 
@@ -342,27 +343,17 @@ static void upload_lights(ecs_world_t *world, const MyeRender3dState *state,
     }
 }
 
-static void MyeRender3dPass(ecs_iter_t *it)
+/* Draws the scene once, through one camera, into one viewport. */
+static void draw_through(ecs_world_t *world, const MyeRender3dState *state,
+                         const MyeRender3dConfig *config, Camera3D camera,
+                         Rectangle viewport, bool clear)
 {
-    const MyeRender3dConfig *config = ecs_field(it, MyeRender3dConfig, 0);
-    ecs_world_t *world = it->world;
-
-    const MyeRender3dState *state = render3d_state(world);
-    if (state == NULL || state->meshes == NULL) {
-        return;
-    }
-
-    Camera3D camera;
-    if (!mye_camera3d_active(world, &camera, NULL)) {
-        return; /* nothing to look through: skip the pass entirely */
-    }
-
     bool use_pbr = config->use_pbr && state->pbr_ready;
     if (state->shader_ready || use_pbr) {
         upload_lights(world, state, config, camera);
     }
 
-    BeginMode3D(camera);
+    mye_camera_begin_3d(viewport, camera, clear);
 
     if (config->draw_grid) {
         DrawGrid(config->grid_slices, config->grid_spacing);
@@ -426,7 +417,36 @@ static void MyeRender3dPass(ecs_iter_t *it)
         }
     }
 
-    EndMode3D();
+    mye_camera_end_3d();
+}
+
+/* Every active camera draws, in order: a minimap is a second camera entity
+ * and nothing else. One camera is the same code path, drawing once into the
+ * whole window. */
+static void MyeRender3dPass(ecs_iter_t *it)
+{
+    const MyeRender3dConfig *config = ecs_field(it, MyeRender3dConfig, 0);
+    ecs_world_t *world = it->world;
+
+    const MyeRender3dState *state = render3d_state(world);
+    if (state == NULL || state->meshes == NULL) {
+        return;
+    }
+
+    ecs_entity_t cameras[MYE_MAX_DRAWN_CAMERAS];
+    int count = mye_camera3d_collect(world, cameras, MYE_MAX_DRAWN_CAMERAS);
+
+    for (int i = 0; i < count; ++i) {
+        Camera3D camera;
+        if (!mye_camera3d_resolve(world, cameras[i], &camera)) {
+            continue;
+        }
+        /* The first camera composites onto the frame's clear; the rest
+         * clear their own viewport, or they draw into the previous
+         * camera's depth buffer and vanish. */
+        draw_through(world, state, config, camera,
+                     mye_camera_viewport(world, cameras[i]), i > 0);
+    }
 }
 
 /* ------------------------------------------------------------ animation -- */

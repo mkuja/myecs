@@ -5,6 +5,7 @@
 #include "core/log.h"
 
 #include <raymath.h>
+#include <rlgl.h>
 
 #include <stdlib.h>
 
@@ -60,15 +61,6 @@ static int compare_draw_items(const void *lhs, const void *rhs)
         return ta < tb ? -1 : 1;
     }
     return 0;
-}
-
-static Camera2D active_camera(ecs_world_t *world)
-{
-    /* Identity view when a scene has no camera, so a game that never sets
-     * one still draws in world coordinates. */
-    Camera2D camera = { .zoom = 1.0f };
-    mye_camera2d_active(world, &camera, NULL);
-    return camera;
 }
 
 /* ----------------------------------------------------------------- passes -- */
@@ -179,18 +171,62 @@ static void MyeRenderSprites(ecs_iter_t *it)
 
     qsort(items, (size_t)count, sizeof *items, compare_draw_items);
 
-    BeginMode2D(active_camera(world));
-    for (int32_t i = 0; i < count; ++i) {
-        DrawTexturePro(*items[i].texture, items[i].source, items[i].dest,
-                       items[i].origin, items[i].rotation_degrees,
-                       items[i].tint);
+    /* Every active camera draws the same sorted list, each into its own
+     * viewport, in order. The list is built once: sorting it per camera
+     * would be the same work repeated. */
+    ecs_entity_t cameras[MYE_MAX_DRAWN_CAMERAS];
+    int camera_count = mye_camera2d_collect(world, cameras,
+                                            MYE_MAX_DRAWN_CAMERAS);
+
+    if (camera_count == 0) {
+        /* No camera at all: draw once in world coordinates, so a game that
+         * never sets one still sees its sprites. */
+        BeginMode2D((Camera2D){ .zoom = 1.0f });
+        for (int32_t i = 0; i < count; ++i) {
+            DrawTexturePro(*items[i].texture, items[i].source, items[i].dest,
+                           items[i].origin, items[i].rotation_degrees,
+                           items[i].tint);
+        }
+        EndMode2D();
+        return;
     }
-    EndMode2D();
+
+    for (int c = 0; c < camera_count; ++c) {
+        Camera2D camera;
+        if (!mye_camera2d_resolve(world, cameras[c], &camera)) {
+            continue;
+        }
+        mye_camera_begin_2d(mye_camera_viewport(world, cameras[c]), camera);
+        for (int32_t i = 0; i < count; ++i) {
+            DrawTexturePro(*items[i].texture, items[i].source, items[i].dest,
+                           items[i].origin, items[i].rotation_degrees,
+                           items[i].tint);
+        }
+        mye_camera_end_2d();
+    }
 }
 
 static void MyeRenderEnd(ecs_iter_t *it)
 {
-    (void)it;
+    /* Anything that wants this frame's pixels must read them HERE, before
+     * EndDrawing swaps buffers. After the swap the back buffer holds
+     * whatever the driver left there -- usually the previous frame -- and a
+     * read then is a frame late at best. That is not theoretical: it hid a
+     * multi-camera bug for an afternoon by showing the frame before. */
+    mye_engine *engine = mye_engine_get(it->world);
+    if (engine != NULL && engine->screenshot_path != NULL &&
+        engine->max_frames > 0) {
+        const MyeTime *now = ecs_singleton_get(it->world, MyeTime);
+        if (now != NULL && now->frame >= engine->max_frames) {
+            rlDrawRenderBatchActive();
+            Image shot = LoadImageFromScreen();
+            if (shot.data != NULL) {
+                ExportImage(shot, engine->screenshot_path);
+                UnloadImage(shot);
+            }
+            engine->screenshot_path = NULL; /* once only */
+        }
+    }
     EndDrawing();
 }
 
