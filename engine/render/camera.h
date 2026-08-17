@@ -68,6 +68,10 @@ typedef struct MyeCameraFollow {
      * camera z is ignored. */
     Vector3 offset;
 
+    /* If the target is deleted the camera simply stays put, silently: what
+     * that should mean is the game's decision, made by writing the camera or
+     * this component. The engine takes no stance. */
+
     /* How hard the camera is pulled toward where it should be, per second.
      * 0 snaps exactly. Around 8 is a gentle lag; 20 is nearly rigid. The
      * blend is framerate-independent (exponential decay), so it behaves the

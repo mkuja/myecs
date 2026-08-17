@@ -288,7 +288,7 @@ TEST(a_camera_moved_this_frame_resolves_to_where_it_was_moved)
     ASSERT_EQ_INT(0, mye_shutdown(world));
 }
 
-TEST(a_dead_follow_target_leaves_the_camera_where_it_is)
+TEST(a_dead_follow_target_changes_nothing_at_all)
 {
     ecs_world_t *world = make_world();
     ASSERT_TRUE(world != NULL);
@@ -305,9 +305,10 @@ TEST(a_dead_follow_target_leaves_the_camera_where_it_is)
     for (int i = 0; i < 5; ++i) {
         mye_progress(world, FIXED_DT);
     }
-    /* Held, not snapped to the origin -- and said once, not five times. */
+    /* Held exactly where it was, and nothing said: what a dead target means
+     * is the game's call, not the engine's. */
     ASSERT_NEAR(300.0f, ecs_get(world, cam, MyePosition2D)->x, 0.01f);
-    ASSERT_EQ_U64(before.warn + 1, mye_log_get_counts().warn);
+    ASSERT_EQ_U64(before.warn, mye_log_get_counts().warn);
 
     ASSERT_EQ_INT(0, mye_shutdown(world));
 }
@@ -659,7 +660,7 @@ TEST_MAIN(TEST_CASE(a_root_camera_resolves_to_its_own_position_and_fov),
           TEST_CASE(a_follow_camera_tracks_the_drawn_position_not_the_simulated_one),
           TEST_CASE(follow_with_stiffness_converges_without_overshooting),
           TEST_CASE(a_camera_moved_this_frame_resolves_to_where_it_was_moved),
-          TEST_CASE(a_dead_follow_target_leaves_the_camera_where_it_is),
+          TEST_CASE(a_dead_follow_target_changes_nothing_at_all),
           TEST_CASE(a_world_point_projects_to_the_pixel_whose_ray_hits_it),
           TEST_CASE(screen_and_world_round_trip_through_a_2d_camera),
           TEST_CASE(a_camera_with_no_transform_components_still_resolves),

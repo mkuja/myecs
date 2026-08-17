@@ -18,7 +18,6 @@ typedef struct MyeCameraState {
     bool warned_multiple_3d;
     bool warned_multiple_2d;
     bool warned_bare_parent;
-    bool warned_dead_target;
 } MyeCameraState;
 
 ECS_COMPONENT_DECLARE(MyeCameraState);
@@ -400,15 +399,12 @@ static void MyeCameraFollowUpdate(ecs_iter_t *it)
         ecs_entity_t camera = it->entities[i];
         ecs_entity_t target = follow[i].target;
         if (target == 0 || !ecs_is_alive(world, target)) {
-            /* Hold position rather than snap to the origin, and say so once:
-             * a camera that quietly stops following looks like a freeze. */
-            MyeCameraState *state = camera_state(world);
-            if (state != NULL && !state->warned_dead_target) {
-                state->warned_dead_target = true;
-                mye_log_warn("camera: follow target of entity %llu is gone; "
-                             "the camera is holding its last position",
-                             (unsigned long long)camera);
-            }
+            /* The target is gone. Do nothing: the camera stays exactly where
+             * it was, as if nothing had happened. What a dead target MEANS
+             * -- hold, pan to the wreck, cut to a respawn point -- is the
+             * game's decision to make, and it makes it by writing the camera
+             * or the follow component. The engine takes no stance, and does
+             * not warn, because there is nothing wrong. */
             continue;
         }
 
