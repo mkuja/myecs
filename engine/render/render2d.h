@@ -94,11 +94,12 @@ typedef struct MyeHidden {
  * render/camera.h. The first one marked active is the one that draws. */
 typedef struct MyeCamera2D {
     float zoom;      /* 1 = one world unit per pixel; 0 is treated as 1 */
-    float rotation;  /* degrees */
     Vector2 offset;  /* where on screen the camera's position lands;
                         mye_camera2d_spawn defaults it to the centre */
     bool active;
 } MyeCamera2D;
+/* No rotation field: the view turns with the entity's MyeRotation2D and its
+ * parents, like everything else. */
 
 /* Screen clear colour and other per-scene render settings. */
 typedef struct MyeRenderConfig {

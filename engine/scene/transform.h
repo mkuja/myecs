@@ -138,4 +138,8 @@ Matrix mye_trs_matrix(Vector3 translation, Quaternion rotation, Vector3 scale);
 /* Translation column of a matrix. */
 Vector3 mye_matrix_translation(Matrix m);
 
+/* The rotation part of a matrix, with any scale divided out first --
+ * QuaternionFromMatrix alone is only right for an orthonormal matrix. */
+Quaternion mye_matrix_rotation(Matrix m);
+
 #endif /* MYE_SCENE_TRANSFORM_H */

@@ -17,6 +17,8 @@ typedef struct MyeCameraState {
     ecs_query_t *cameras2d;
     bool warned_multiple_3d;
     bool warned_multiple_2d;
+    bool warned_bare_parent;
+    bool warned_dead_target;
 } MyeCameraState;
 
 ECS_COMPONENT_DECLARE(MyeCameraState);
@@ -55,7 +57,25 @@ static Matrix camera_parent_matrix(const ecs_world_t *world,
         return r->m;
     }
     const MyeWorldTransform *w = ecs_get(world, parent, MyeWorldTransform);
-    return w != NULL ? w->m : MatrixIdentity();
+    if (w != NULL) {
+        return w->m;
+    }
+
+    /* The parent has a position but no transform matrices (a mye_sprite_spawn
+     * entity, say), so the camera cannot follow it and sits at the origin.
+     * The sprite pass has a warning for this shape; a camera has no sprite,
+     * so it needs its own. */
+    MyeCameraState *state = camera_state(world);
+    if (state != NULL && !state->warned_bare_parent) {
+        state->warned_bare_parent = true;
+        const char *name = ecs_get_name(world, parent);
+        mye_log_warn("camera: parented to '%s', which has no MyeLocalTransform/"
+                     "MyeWorldTransform, so the camera cannot be carried by it "
+                     "and sits at the origin. Spawn the parent with "
+                     "mye_spawn_2d/3d, or add both components.",
+                     name != NULL ? name : "<unnamed>");
+    }
+    return MatrixIdentity();
 }
 
 static Matrix camera_matrix(const ecs_world_t *world, ecs_entity_t camera)
@@ -82,8 +102,10 @@ static Matrix camera_matrix(const ecs_world_t *world, ecs_entity_t camera)
         }
     }
 
-    /* Scale is deliberately dropped: a scaled camera is meaningless, and
-     * inheriting a parent's scale would silently distort the view. */
+    /* The camera's own scale is dropped: a scaled camera is meaningless. A
+     * parent's scale is kept, because it places the camera correctly (a
+     * child at (0,0,10) of a x2 parent really is 20 away); resolve
+     * normalises the axes it extracts, so it cannot distort the view. */
     Matrix local = mye_trs_matrix(position, rotation,
                                   (Vector3){ 1.0f, 1.0f, 1.0f });
 
@@ -134,13 +156,17 @@ bool mye_camera2d_resolve(const ecs_world_t *world, ecs_entity_t camera,
 
     out->target = (Vector2){ position.x, position.y };
     out->offset = cam->offset;
-    out->rotation = cam->rotation;
+    /* The view turns with the entity: a camera rotated by theta shows the
+     * world rotated by -theta, in raylib's degrees. Read from the matrix so
+     * a parent's rotation is included -- there is no second rotation field
+     * on the component to disagree with this. */
+    out->rotation = -atan2f(m.m1, m.m0) * RAD2DEG;
     /* A zero-zoom camera shows nothing, which reads as a broken renderer. */
     out->zoom = cam->zoom != 0.0f ? cam->zoom : 1.0f;
     return true;
 }
 
-/* Shared by both dimensions: first active wins, and say something the once
+/* Shared by both dimensions: first active wins, and say something once
  * if a scene has more than one, because which one you get is otherwise
  * arbitrary and stable enough to look deliberate. */
 static ecs_entity_t first_active(const ecs_world_t *world, ecs_query_t *query,
@@ -237,7 +263,6 @@ ecs_entity_t mye_camera2d_spawn(ecs_world_t *world, Vector2 position,
     ecs_entity_t e = mye_spawn_2d(world, position);
     ecs_set(world, e, MyeCamera2D,
             { .zoom = zoom != 0.0f ? zoom : 1.0f,
-              .rotation = 0.0f,
               /* Centre by default: the camera's position is then what ends
                * up in the middle of the window, which is what "the camera is
                * at the player" is expected to mean. */
@@ -278,9 +303,16 @@ void mye_camera_look_at(ecs_world_t *world, ecs_entity_t camera,
         up = (Vector3){ 0.0f, 0.0f, 1.0f }; /* straight up or down */
     }
     Matrix view = MatrixLookAt(p->v, target, up);
-    Quaternion rotation = QuaternionFromMatrix(MatrixInvert(view));
+    /* A view matrix is world->camera; its transpose (an orthonormal
+     * matrix's inverse) is the camera's orientation in the world. */
+    Quaternion rotation = QuaternionFromMatrix(MatrixTranspose(view));
 
-    ecs_set(world, camera, MyeRotation3D, { rotation });
+    /* Written in place rather than ecs_set: a deferred write from a system
+     * lands at the next merge, which under worker threads is after the draw
+     * passes -- the camera would aim one frame late. */
+    MyeRotation3D *rot = ecs_ensure(world, camera, MyeRotation3D);
+    rot->q = rotation;
+    ecs_modified(world, camera, MyeRotation3D);
 }
 
 void mye_camera_set_fov(ecs_world_t *world, ecs_entity_t camera,
@@ -365,9 +397,19 @@ static void MyeCameraFollowUpdate(ecs_iter_t *it)
     float dt = (float)it->delta_time;
 
     for (int i = 0; i < it->count; ++i) {
+        ecs_entity_t camera = it->entities[i];
         ecs_entity_t target = follow[i].target;
         if (target == 0 || !ecs_is_alive(world, target)) {
-            continue; /* target gone: hold position rather than snap to origin */
+            /* Hold position rather than snap to the origin, and say so once:
+             * a camera that quietly stops following looks like a freeze. */
+            MyeCameraState *state = camera_state(world);
+            if (state != NULL && !state->warned_dead_target) {
+                state->warned_dead_target = true;
+                mye_log_warn("camera: follow target of entity %llu is gone; "
+                             "the camera is holding its last position",
+                             (unsigned long long)camera);
+            }
+            continue;
         }
 
         /* The DRAWN position, not the simulated one. A camera that followed
@@ -378,7 +420,12 @@ static void MyeCameraFollowUpdate(ecs_iter_t *it)
         Vector3 desired = Vector3Add(
             target_pos, Vector3RotateByQuaternion(follow[i].offset, target_rot));
 
-        ecs_entity_t camera = it->entities[i];
+        /* `desired` is a world point; the camera's position is in its
+         * parent's space. Convert, or a following camera that is also
+         * parented lands at parent + world instead of at the target. */
+        desired = Vector3Transform(
+            desired, MatrixInvert(camera_parent_matrix(world, camera)));
+
         MyePosition3D *p3 = ecs_get_mut(world, camera, MyePosition3D);
         MyePosition2D *p2 =
             p3 == NULL ? ecs_get_mut(world, camera, MyePosition2D) : NULL;
@@ -420,6 +467,14 @@ static void camera_state_fini(ecs_world_t *world, void *ctx)
 void MyeCameraModuleImport(ecs_world_t *world)
 {
     ECS_MODULE(world, MyeCameraModule);
+
+    /* The queries below name MyeCamera2D and MyeCamera3D, which the
+     * renderers own. Import them here rather than trusting the caller's
+     * order: imported too early, every query silently matched nothing and
+     * the 3D pass drew an empty screen with no error. Re-import is a no-op
+     * when the engine has already done it. */
+    ECS_IMPORT(world, MyeRender2dModule);
+    ECS_IMPORT(world, MyeRender3dModule);
 
     ECS_COMPONENT_DEFINE(world, MyeCameraFollow);
     ECS_COMPONENT_DEFINE(world, MyeCameraState);

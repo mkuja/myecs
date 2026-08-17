@@ -4,7 +4,11 @@
  * Labeled "render" in CTest, so headless machines can skip it:
  *     ctest -LE render
  * See plan/09-testing.md. */
+#include "asset/asset.h"
 #include "core/engine.h"
+#include "render/camera.h"
+#include "render/render3d.h"
+#include "scene/transform.h"
 #include "mye_test.h"
 
 #include <raylib.h>
@@ -54,6 +58,18 @@ TEST(renders_frames_and_shuts_down_clean)
         ecs_entity_t e = ecs_new(world);
         ecs_set(world, e, Position, { (float)(i * 8 + 16), (float)(i * 4 + 16) });
     }
+
+    /* The 3D pass with a resolved camera, through real GL: a parented
+     * camera looking at a mesh. Nothing here asserts pixels; it asserts that
+     * the whole path -- resolve, BeginMode3D, DrawMesh -- runs without
+     * tripping the sanitizers or leaking. */
+    ecs_entity_t pivot = mye_spawn_3d(world, (Vector3){ 0.0f, 0.0f, 0.0f });
+    ecs_entity_t camera = mye_camera3d_spawn(world, (Vector3){ 0.0f, 3.0f, 8.0f },
+                                             (Vector3){ 0.0f, 0.0f, 0.0f }, 50.0f);
+    mye_set_parent(world, camera, pivot);
+    mye_model cube = mye_model_from_mesh(world, "smoke:cube",
+                                         GenMeshCube(1.0f, 1.0f, 1.0f), WHITE);
+    mye_mesh_spawn(world, cube, (Vector3){ 0.0f, 0.5f, 0.0f }, SKYBLUE);
 
     frames_drawn = 0;
     while (mye_running(world)) {

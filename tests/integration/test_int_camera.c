@@ -301,11 +301,13 @@ TEST(a_dead_follow_target_leaves_the_camera_where_it_is)
     ASSERT_NEAR(300.0f, ecs_get(world, cam, MyePosition2D)->x, 0.01f);
 
     ecs_delete(world, target);
+    mye_log_counts before = mye_log_get_counts();
     for (int i = 0; i < 5; ++i) {
         mye_progress(world, FIXED_DT);
     }
-    /* Held, not snapped to the origin. */
+    /* Held, not snapped to the origin -- and said once, not five times. */
     ASSERT_NEAR(300.0f, ecs_get(world, cam, MyePosition2D)->x, 0.01f);
+    ASSERT_EQ_U64(before.warn + 1, mye_log_get_counts().warn);
 
     ASSERT_EQ_INT(0, mye_shutdown(world));
 }
@@ -323,8 +325,10 @@ TEST(a_world_point_projects_to_the_pixel_whose_ray_hits_it)
 
     Vector3 point = { 2.0f, 1.0f, 0.0f };
     Vector2 screen = mye_world_to_screen(world, point);
-    ASSERT_TRUE(screen.x > 0.0f && screen.x < 1280.0f);
-    ASSERT_TRUE(screen.y > 0.0f && screen.y < 720.0f);
+    /* Right of and above centre -- a mirrored camera would still round-trip
+     * with itself, so the direction is asserted, not just the consistency. */
+    ASSERT_TRUE(screen.x > 640.0f && screen.x < 1280.0f);
+    ASSERT_TRUE(screen.y > 0.0f && screen.y < 360.0f);
 
     /* Cast back: the ray under that pixel must pass through the point. */
     Ray ray = mye_screen_ray(world, screen);
@@ -430,6 +434,223 @@ TEST(more_than_one_active_camera_warns_once)
     ASSERT_EQ_INT(0, mye_shutdown(world));
 }
 
+
+/* --- gaps a review found ------------------------------------------------- */
+
+/* The player the design was built for: an interpolated sprite that is NOT in
+ * the hierarchy (mye_sprite_spawn + MyeInterpolate, as in the tutorial and
+ * Asteroids). The sprite pass draws it blended; the drawn position must say
+ * the same, or a follow camera slides the world under the player. */
+TEST(render_position_blends_an_interpolated_sprite_outside_the_hierarchy)
+{
+    ecs_world_t *world = make_moving_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t player = mye_entity_new(world);
+    ecs_set(world, player, MyePosition2D, { 0.0f, 0.0f });
+    ecs_set(world, player, Drift, { 600.0f, 0.0f });
+    ecs_set(world, player, MyeInterpolate, { 0 });
+    /* No MyeLocalTransform / MyeWorldTransform on purpose. */
+
+    for (int i = 0; i < 9; ++i) {
+        mye_progress(world, FIXED_DT * 1.5f);
+    }
+    const MyeTime *time = ecs_singleton_get(world, MyeTime);
+    ASSERT_NEAR(0.5f, time->alpha, 0.01f);
+
+    const MyePosition2D *pos = ecs_get(world, player, MyePosition2D);
+    const MyeInterpolate *interp = ecs_get(world, player, MyeInterpolate);
+    float drawn_by_sprite_pass =
+        interp->prev_x + (pos->x - interp->prev_x) * time->alpha;
+
+    Vector3 reported = mye_render_position(world, player);
+    ASSERT_TRUE(fabsf(pos->x - drawn_by_sprite_pass) > 1.0f); /* they differ */
+    ASSERT_NEAR(drawn_by_sprite_pass, reported.x, 0.01f);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* QuaternionFromMatrix on a scaled matrix gives a quaternion that scales
+ * whatever it rotates. A follow offset on the showcase's x900 boombox would
+ * land tens of kilometres away. */
+TEST(render_rotation_is_a_pure_rotation_even_for_a_scaled_entity)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t big = mye_spawn_3d(world, (Vector3){ 0.0f, 0.0f, 0.0f });
+    ecs_set(world, big, MyeScale3D, { { 900.0f, 900.0f, 900.0f } });
+    ecs_set(world, big, MyeRotation3D,
+            { QuaternionFromAxisAngle((Vector3){ 0.0f, 1.0f, 0.0f },
+                                      PI / 2.0f) });
+    mye_progress(world, FIXED_DT);
+
+    Quaternion q = mye_render_rotation(world, big);
+    ASSERT_NEAR(1.0f, QuaternionLength(q), 0.001f);
+
+    /* Yawed a quarter turn: local +Z points along world +X, unit length. */
+    Vector3 v = Vector3RotateByQuaternion((Vector3){ 0.0f, 0.0f, 1.0f }, q);
+    assert_near_v3(T, v, (Vector3){ 1.0f, 0.0f, 0.0f }, 0.001f, "rotated");
+
+    /* And the offset a follow would apply stays an offset. */
+    ecs_entity_t cam = mye_camera3d_spawn(world, (Vector3){ 0.0f, 0.0f, 0.0f },
+                                          (Vector3){ 0.0f, 0.0f, 1.0f }, 60.0f);
+    ecs_set(world, cam, MyeCameraFollow, { .target = big,
+                                           .offset = { 0.0f, 2.0f, 5.0f },
+                                           .stiffness = 0.0f });
+    mye_progress(world, FIXED_DT);
+    assert_near_v3(T, ecs_get(world, cam, MyePosition3D)->v,
+                   (Vector3){ 5.0f, 2.0f, 0.0f }, 0.01f, "offset");
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* A following camera that is itself parented: the target is a world point,
+ * the camera's position is in its parent's space. */
+TEST(a_parented_follow_camera_lands_on_the_target_not_beside_it)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t rig = mye_spawn_2d(world, (Vector2){ 1000.0f, 0.0f });
+    ecs_entity_t player = mye_spawn_2d(world, (Vector2){ 50.0f, 0.0f });
+    ecs_entity_t cam = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f }, 1.0f);
+    mye_set_parent(world, cam, rig);
+    ecs_set(world, cam, MyeCameraFollow, { .target = player,
+                                           .stiffness = 0.0f });
+    mye_progress(world, FIXED_DT);
+    mye_progress(world, FIXED_DT);
+
+    Camera2D c;
+    ASSERT_TRUE(mye_camera2d_resolve(world, cam, &c));
+    ASSERT_NEAR(50.0f, c.target.x, 0.01f); /* not 1050 */
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* The 2D view turns with the entity, from the transform -- there is no
+ * separate rotation field to fall out of step with it. */
+TEST(a_2d_camera_s_view_turns_with_its_rotation)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t cam = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f }, 1.0f);
+    ecs_set(world, cam, MyeRotation2D, { PI / 2.0f });
+    mye_progress(world, FIXED_DT);
+
+    Camera2D c;
+    ASSERT_TRUE(mye_camera2d_resolve(world, cam, &c));
+    ASSERT_NEAR(90.0f, fabsf(c.rotation), 0.01f);
+
+    /* The camera's local +x axis is what should run along the screen's +x:
+     * a world point 100 units along it lands 100 px right of centre. */
+    Vector2 along_local_x = { 0.0f, 100.0f }; /* world = rotate((100,0), 90) */
+    Vector2 on_screen = mye_world_to_screen_2d(world, along_local_x);
+    ASSERT_NEAR(740.0f, on_screen.x, 0.5f);
+    ASSERT_NEAR(360.0f, on_screen.y, 0.5f);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* A camera parented to an interpolated entity is carried by the BLENDED
+ * parent -- the path through camera_parent_matrix's MyeRenderTransform. */
+TEST(a_camera_child_of_an_interpolated_parent_rides_the_blend)
+{
+    ecs_world_t *world = make_moving_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t player = mye_spawn_2d(world, (Vector2){ 0.0f, 0.0f });
+    ecs_set(world, player, Drift, { 600.0f, 0.0f });
+    ecs_set(world, player, MyeInterpolate, { 0 });
+    ecs_entity_t cam = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f }, 1.0f);
+    mye_set_parent(world, cam, player);
+
+    for (int i = 0; i < 9; ++i) {
+        mye_progress(world, FIXED_DT * 1.5f);
+    }
+    ASSERT_NEAR(0.5f, ecs_singleton_get(world, MyeTime)->alpha, 0.01f);
+
+    Camera2D c;
+    ASSERT_TRUE(mye_camera2d_resolve(world, cam, &c));
+    Vector3 drawn = mye_render_position(world, player);
+    Vector3 stepped = mye_world_position(world, player);
+    ASSERT_TRUE(fabsf(drawn.x - stepped.x) > 1.0f);
+    ASSERT_NEAR(drawn.x, c.target.x, 0.01f);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+TEST(a_3d_follow_applies_its_offset_in_the_target_s_frame)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t hero = mye_spawn_3d(world, (Vector3){ 10.0f, 0.0f, 10.0f });
+    ecs_set(world, hero, MyeRotation3D,
+            { QuaternionFromAxisAngle((Vector3){ 0.0f, 1.0f, 0.0f },
+                                      PI / 2.0f) });
+    ecs_entity_t cam = mye_camera3d_spawn(world, (Vector3){ 0.0f, 0.0f, 0.0f },
+                                          (Vector3){ 0.0f, 0.0f, 1.0f }, 60.0f);
+    /* "Behind and above" -- and it stays behind as the hero turns. */
+    ecs_set(world, cam, MyeCameraFollow, { .target = hero,
+                                           .offset = { 0.0f, 2.0f, 5.0f },
+                                           .stiffness = 0.0f });
+    mye_progress(world, FIXED_DT);
+
+    /* Hero yawed +90: its local +Z is world +X, so behind = +5 in X. */
+    assert_near_v3(T, ecs_get(world, cam, MyePosition3D)->v,
+                   (Vector3){ 15.0f, 2.0f, 10.0f }, 0.01f, "3d follow");
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+TEST(orthographic_projection_passes_through)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t cam = mye_camera3d_spawn(world, (Vector3){ 0.0f, 10.0f, 0.0f },
+                                          (Vector3){ 0.0f, 0.0f, 0.0f }, 20.0f);
+    MyeCamera3D *c = ecs_get_mut(world, cam, MyeCamera3D);
+    c->projection = CAMERA_ORTHOGRAPHIC;
+    ecs_modified(world, cam, MyeCamera3D);
+    mye_progress(world, FIXED_DT);
+
+    Camera3D r;
+    ASSERT_TRUE(mye_camera3d_resolve(world, cam, &r));
+    ASSERT_EQ_INT(CAMERA_ORTHOGRAPHIC, r.projection);
+    ASSERT_NEAR(20.0f, r.fovy, 0.001f); /* ortho: fovy is the view height */
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* A camera parented to a bare entity cannot be carried; it must say so
+ * rather than silently sit at the origin. */
+TEST(a_camera_parented_to_a_transformless_entity_warns_once)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t bare = mye_entity_new(world);
+    ecs_set(world, bare, MyePosition2D, { 300.0f, 200.0f });
+    ecs_entity_t cam = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f }, 1.0f);
+    mye_set_parent(world, cam, bare);
+
+    /* Headless has no draw pass to resolve the camera, so resolve it the
+     * way a game's own code would. Five times: the warning latches. */
+    mye_log_counts before = mye_log_get_counts();
+    Camera2D c;
+    for (int i = 0; i < 5; ++i) {
+        mye_progress(world, FIXED_DT);
+        ASSERT_TRUE(mye_camera2d_resolve(world, cam, &c));
+    }
+    ASSERT_EQ_U64(before.warn + 1, mye_log_get_counts().warn);
+    ASSERT_NEAR(0.0f, c.target.x, 0.001f); /* and it does sit at the origin */
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
 TEST_MAIN(TEST_CASE(a_root_camera_resolves_to_its_own_position_and_fov),
           TEST_CASE(a_camera_child_of_a_rotating_parent_turns_with_it),
           TEST_CASE(look_at_points_the_camera_at_the_target),
@@ -443,4 +664,12 @@ TEST_MAIN(TEST_CASE(a_root_camera_resolves_to_its_own_position_and_fov),
           TEST_CASE(screen_and_world_round_trip_through_a_2d_camera),
           TEST_CASE(a_camera_with_no_transform_components_still_resolves),
           TEST_CASE(no_active_camera_is_reported_rather_than_guessed),
-          TEST_CASE(more_than_one_active_camera_warns_once))
+          TEST_CASE(more_than_one_active_camera_warns_once),
+          TEST_CASE(render_position_blends_an_interpolated_sprite_outside_the_hierarchy),
+          TEST_CASE(render_rotation_is_a_pure_rotation_even_for_a_scaled_entity),
+          TEST_CASE(a_parented_follow_camera_lands_on_the_target_not_beside_it),
+          TEST_CASE(a_2d_camera_s_view_turns_with_its_rotation),
+          TEST_CASE(a_camera_child_of_an_interpolated_parent_rides_the_blend),
+          TEST_CASE(a_3d_follow_applies_its_offset_in_the_target_s_frame),
+          TEST_CASE(orthographic_projection_passes_through),
+          TEST_CASE(a_camera_parented_to_a_transformless_entity_warns_once))

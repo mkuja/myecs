@@ -691,25 +691,43 @@ Two things this does that are easy to get wrong by hand:
   position makes the whole world shimmer against a player who is perfectly
   smooth.
 - It runs in the `MyeOnCamera` phase, after transforms are propagated and
-  blended. A follow system in `EcsOnUpdate` reads a position from *before* the
-  player moved this frame, so the camera is permanently a frame behind.
+  blended. A follow system in `EcsOnUpdate` sees the player's *stepped*
+  position — which mid-step is not where the sprite is drawn.
 
-Write your own camera logic — an orbit, a cutscene rig — in that same phase:
+Write your own camera logic in that same phase when it **reads other entities
+and writes the camera's own position**. Screen shake is the classic: rather
+than nudging the camera itself (a random walk that never comes back), parent
+the camera to a rig and jitter the camera's *offset from the rig*, decaying
+to zero. The rig follows the player; the shake stays bounded:
 
 ```c file
+typedef struct Shake { float strength; } Shake;   /* on the camera */
+
 static void ShakeCamera(ecs_iter_t *it)
 {
-    MyePosition2D *pos = ecs_field(it, MyePosition2D, 0);
+    MyePosition2D *local = ecs_field(it, MyePosition2D, 0); /* offset from rig */
+    Shake *shake = ecs_field(it, Shake, 1);
+    float dt = (float)it->delta_time;
+
     for (int i = 0; i < it->count; ++i) {
-        pos[i].x += (float)GetRandomValue(-2, 2);
+        float s = shake[i].strength;
+        local[i].x = (float)GetRandomValue(-100, 100) * 0.01f * s;
+        local[i].y = (float)GetRandomValue(-100, 100) * 0.01f * s;
+        shake[i].strength = s * (1.0f - 4.0f * dt); /* dies out in ~¼ s */
+        if (shake[i].strength < 0.1f) shake[i].strength = 0.0f;
     }
 }
 
 static void register_shake(ecs_world_t *world)
 {
-    ECS_SYSTEM(world, ShakeCamera, MyeOnCamera, MyePosition2D, MyeCamera2D);
+    ECS_SYSTEM(world, ShakeCamera, MyeOnCamera, MyePosition2D, Shake, MyeCamera2D);
 }
 ```
+
+One rule worth knowing before it bites: in `MyeOnCamera`, writes to the
+camera's **own** position land this frame; writes to something the camera is
+*parented to* land next frame, because transforms were already propagated.
+Move rigs in `EcsOnUpdate`; move cameras in `MyeOnCamera`.
 
 ### Rigid attachment is just parenting
 

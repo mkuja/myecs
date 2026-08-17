@@ -77,8 +77,9 @@ static void CameraControl(ecs_iter_t *it)
     ecs_set(world, state->pivot, MyeRotation3D,
             { QuaternionFromAxisAngle((Vector3){ 0.0f, 1.0f, 0.0f },
                                       state->orbit_angle) });
-    ecs_set(world, state->camera, MyePosition3D,
-            { { 0.0f, state->camera_height, state->orbit_distance } });
+    MyePosition3D *cam_pos = ecs_ensure(world, state->camera, MyePosition3D);
+    cam_pos->v = (Vector3){ 0.0f, state->camera_height, state->orbit_distance };
+    ecs_modified(world, state->camera, MyePosition3D);
     mye_camera_look_at(world, state->camera, (Vector3){ 0.0f, 40.0f, 0.0f });
 
     /* Switching animation cycles on one rig -- the thing Fox exists to
@@ -277,7 +278,11 @@ int main(void)
               .enabled = true });
 
     ECS_SYSTEM(world, SpinBoomBox, MyeOnFixedUpdate, MyeRotation3D);
-    ECS_SYSTEM(world, CameraControl, MyeOnCamera, ShowcaseState);
+    /* EcsOnUpdate, not MyeOnCamera: this system moves the camera's PARENT (the
+     * pivot). Writes to a parent must land before transform propagation, or
+     * they show up a frame late. MyeOnCamera is for systems that read other
+     * entities' drawn positions and write the camera's own transform. */
+    ECS_SYSTEM(world, CameraControl, EcsOnUpdate, ShowcaseState);
     ECS_SYSTEM(world, DrawHud, MyeOnDrawUI, [in] ShowcaseState);
 
     MyeRenderConfig *render_config = ecs_singleton_ensure(world,

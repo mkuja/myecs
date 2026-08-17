@@ -1,5 +1,11 @@
 #include "scene/transform.h"
 
+/* For MyeInterpolate: an entity outside the hierarchy that opted in is drawn
+ * blended by the sprite pass, and "where is it drawn" has to give the same
+ * answer. A header dependency only -- render2d imports this module, not the
+ * other way round. */
+#include "render/render2d.h"
+
 #include <raymath.h>
 
 ECS_COMPONENT_DECLARE(MyePosition2D);
@@ -172,9 +178,45 @@ Vector3 mye_render_position(const ecs_world_t *world, ecs_entity_t entity)
     }
     const MyePosition2D *p2 = ecs_get(world, entity, MyePosition2D);
     if (p2 != NULL) {
+        /* An interpolated sprite outside the hierarchy is drawn blended by
+         * the sprite pass (render2d.c). This must say the same, or a camera
+         * following it trails the picture by up to a step -- the exact
+         * shimmer the whole drawn-position idea exists to prevent. */
+        const MyeInterpolate *interp = ecs_get(world, entity, MyeInterpolate);
+        const MyeTime *time = ecs_singleton_get(world, MyeTime);
+        if (interp != NULL && !interp->snap && time != NULL) {
+            float alpha = time->alpha;
+            return (Vector3){ interp->prev_x + (p2->x - interp->prev_x) * alpha,
+                              interp->prev_y + (p2->y - interp->prev_y) * alpha,
+                              0.0f };
+        }
         return (Vector3){ p2->x, p2->y, 0.0f };
     }
     return (Vector3){ 0.0f, 0.0f, 0.0f };
+}
+
+/* raymath's QuaternionFromMatrix assumes an orthonormal 3x3. A scaled matrix
+ * gives an unnormalised quaternion whose w:xyz ratio is already wrong --
+ * normalising afterwards does not repair it -- and anything rotated by it is
+ * then scaled as well. Divide the scale out first. */
+Quaternion mye_matrix_rotation(Matrix m)
+{
+    Vector3 x = Vector3Normalize((Vector3){ m.m0, m.m1, m.m2 });
+    Vector3 y = Vector3Normalize((Vector3){ m.m4, m.m5, m.m6 });
+    Vector3 z = Vector3Normalize((Vector3){ m.m8, m.m9, m.m10 });
+
+    /* A negative-scale flip is a mirror, not a rotation; there is no correct
+     * quaternion for it. Restore a right-handed basis so the result is at
+     * least a proper rotation instead of garbage. */
+    if (Vector3DotProduct(Vector3CrossProduct(x, y), z) < 0.0f) {
+        z = Vector3Negate(z);
+    }
+
+    Matrix ortho = m;
+    ortho.m0 = x.x; ortho.m1 = x.y; ortho.m2 = x.z;
+    ortho.m4 = y.x; ortho.m5 = y.y; ortho.m6 = y.z;
+    ortho.m8 = z.x; ortho.m9 = z.y; ortho.m10 = z.z;
+    return QuaternionNormalize(QuaternionFromMatrix(ortho));
 }
 
 Quaternion mye_render_rotation(const ecs_world_t *world, ecs_entity_t entity)
@@ -183,7 +225,7 @@ Quaternion mye_render_rotation(const ecs_world_t *world, ecs_entity_t entity)
     const MyeWorldTransform *w =
         r == NULL ? ecs_get(world, entity, MyeWorldTransform) : NULL;
     if (r != NULL || w != NULL) {
-        return QuaternionFromMatrix(r != NULL ? r->m : w->m);
+        return mye_matrix_rotation(r != NULL ? r->m : w->m);
     }
 
     const MyeRotation3D *rot3 = ecs_get(world, entity, MyeRotation3D);

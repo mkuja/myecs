@@ -23,19 +23,30 @@
  * the common case there is mye_camera_look_at(), which just writes the
  * rotation that points at a world position.
  *
- * WHEN CAMERA LOGIC RUNS. Anything that moves a camera belongs in the
- * MyeOnCamera phase (see core/engine.h). It runs after transforms are
- * propagated and blended, so a camera that reads a target's position gets
- * this frame's final, interpolated one. Put that logic in EcsOnUpdate
- * instead and the camera trails the picture by a frame -- which looks like
- * jitter, and is the kind of bug that gets blamed on the renderer.
+ * WHEN CAMERA LOGIC RUNS. The MyeOnCamera phase (see core/engine.h) runs
+ * after transforms are propagated and blended, so a system there that reads
+ * another entity's drawn position -- mye_render_position -- gets this frame's
+ * final, interpolated value. A follower in EcsOnUpdate would see the stepped
+ * position instead, which mid-step is not where the sprite is drawn, and the
+ * world would shimmer against a perfectly smooth player.
  *
- * ONE CAVEAT. A camera moved by a follow system is moved *after* the frame's
- * transforms were computed, so its own world matrix is one frame behind
- * until the next propagation. Nothing that draws is affected -- the view is
- * recomputed from components, not from that matrix -- but anything parented
- * *to* such a camera lags by a frame. Parent cameras to things; do not parent
- * things to a following camera.
+ * The rule, precisely: in MyeOnCamera, writes to the camera's OWN position
+ * and rotation take effect this frame, because the view is recomputed from
+ * those components at draw time. Writes to anything else -- a pivot the
+ * camera is parented to, a rig -- land next frame, because propagation has
+ * already run. Move rigs in EcsOnUpdate; move cameras in MyeOnCamera.
+ *
+ * Write in place (ecs_ensure / ecs_get_mut, then ecs_modified) rather than
+ * with ecs_set: a deferred write from a system lands at the next merge, and
+ * with worker threads that is after the draw passes.
+ *
+ * TWO CAVEATS. A camera moved in MyeOnCamera has a stale world matrix until
+ * the next propagation; nothing that draws is affected, but anything parented
+ * *to* such a camera lags a frame. Parent cameras to things; do not parent
+ * things to a following camera. And mye_camera_look_at on a camera whose
+ * parent has not been propagated yet (spawned this frame, before the first
+ * mye_progress) sees an identity parent -- aim after one frame, or aim the
+ * parent instead.
  */
 #ifndef MYE_RENDER_CAMERA_H
 #define MYE_RENDER_CAMERA_H
@@ -47,7 +58,8 @@
 
 /* Follows another entity. The camera keeps its own position -- it is not a
  * child of the target -- so it can lag behind, which is what makes motion
- * readable instead of rigid. */
+ * readable instead of rigid. A following camera may itself be parented; the
+ * target's world position is converted into the parent's space. */
 typedef struct MyeCameraFollow {
     ecs_entity_t target;
 

@@ -111,8 +111,7 @@ static void BobSystem(ecs_iter_t *it)
 /* Orbit camera. The camera is a CHILD of an invisible pivot at the scene's
  * centre: rotating the pivot swings the camera around it, because the
  * transform hierarchy composes rotation. Nothing here computes a position --
- * only the pivot's yaw and the camera's local offset. Runs in MyeOnCamera,
- * after transforms are propagated. */
+ * only the pivot's yaw and the camera's local offset. */
 static void CameraControl(ecs_iter_t *it)
 {
     SceneState *scene = ecs_field(it, SceneState, 0);
@@ -133,8 +132,9 @@ static void CameraControl(ecs_iter_t *it)
                                       scene->orbit_angle) });
 
     /* Local to the pivot, so the yaw above carries it around. */
-    ecs_set(world, scene->camera, MyePosition3D,
-            { { 0.0f, scene->camera_height, scene->orbit_distance } });
+    MyePosition3D *cam_pos = ecs_ensure(world, scene->camera, MyePosition3D);
+    cam_pos->v = (Vector3){ 0.0f, scene->camera_height, scene->orbit_distance };
+    ecs_modified(world, scene->camera, MyePosition3D);
     mye_camera_look_at(world, scene->camera, (Vector3){ 0.0f, 2.0f, 0.0f });
 
     float fov = mye_camera_get_fov(world, scene->camera);
@@ -302,7 +302,11 @@ int main(void)
     /* Animation on the fixed step: framerate-independent, like the 2D game. */
     ECS_SYSTEM(world, SpinSystem, MyeOnFixedUpdate, Spin, MyeRotation3D);
     ECS_SYSTEM(world, BobSystem, MyeOnFixedUpdate, Bob, MyePosition3D);
-    ECS_SYSTEM(world, CameraControl, MyeOnCamera, SceneState);
+    /* EcsOnUpdate, not MyeOnCamera: this system moves the camera's PARENT (the
+     * pivot). Writes to a parent must land before transform propagation, or
+     * they show up a frame late. MyeOnCamera is for systems that read other
+     * entities' drawn positions and write the camera's own transform. */
+    ECS_SYSTEM(world, CameraControl, EcsOnUpdate, SceneState);
     ECS_SYSTEM(world, DrawHud, MyeOnDrawUI, [in] SceneState);
 
     /* A darker sky than the 2D default suits a lit 3D scene. */
