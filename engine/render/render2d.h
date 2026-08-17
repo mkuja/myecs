@@ -104,6 +104,11 @@ typedef struct MyeCamera2D {
 /* Screen clear colour and other per-scene render settings. */
 typedef struct MyeRenderConfig {
     Color clear_color;
+
+    /* The camera the built-in sprite pass looks through. 0 means "the first
+     * active one". With several cameras, set this to name the main view --
+     * see MyeRender3dConfig.camera. */
+    ecs_entity_t camera;
 } MyeRenderConfig;
 
 extern ECS_COMPONENT_DECLARE(MyeSprite);

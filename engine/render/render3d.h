@@ -70,6 +70,13 @@ typedef struct MyeRender3dConfig {
      * so downloaded models look as their author intended. Blinn-Phong ignores
      * all of it and is cheaper. */
     bool use_pbr;
+
+    /* The camera the built-in 3D pass looks through. 0 means "the first
+     * active one", which is all a game with one camera needs. A game with
+     * several -- a main view and a minimap, say -- sets this to say which is
+     * the main view; the others are its own to draw with, through
+     * mye_camera3d_resolve. How many cameras exist is the game's business. */
+    ecs_entity_t camera;
 } MyeRender3dConfig;
 
 extern ECS_COMPONENT_DECLARE(MyeMeshInstance);

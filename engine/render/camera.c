@@ -15,8 +15,6 @@ ECS_COMPONENT_DECLARE(MyeCameraFollow);
 typedef struct MyeCameraState {
     ecs_query_t *cameras3d;
     ecs_query_t *cameras2d;
-    bool warned_multiple_3d;
-    bool warned_multiple_2d;
     bool warned_bare_parent;
 } MyeCameraState;
 
@@ -165,18 +163,19 @@ bool mye_camera2d_resolve(const ecs_world_t *world, ecs_entity_t camera,
     return true;
 }
 
-/* Shared by both dimensions: first active wins, and say something once
- * if a scene has more than one, because which one you get is otherwise
- * arbitrary and stable enough to look deliberate. */
-static ecs_entity_t first_active(const ecs_world_t *world, ecs_query_t *query,
-                                 bool is_3d, bool *warned)
+/* Which camera the built-in pass looks through: the one the game named in
+ * its render config, else the first active one. Several cameras is a normal
+ * thing to have -- a main view and a minimap -- so more than one is not a
+ * condition to warn about; it is a reason to set the config field. */
+static ecs_entity_t view_camera(const ecs_world_t *world, ecs_query_t *query,
+                                ecs_entity_t configured, bool is_3d)
 {
+    if (configured != 0 && ecs_is_alive(world, configured)) {
+        return configured;
+    }
     if (query == NULL) {
         return 0;
     }
-
-    ecs_entity_t found = 0;
-    int active_count = 0;
 
     ecs_iter_t it = ecs_query_iter(world, query);
     while (ecs_query_next(&it)) {
@@ -184,25 +183,14 @@ static ecs_entity_t first_active(const ecs_world_t *world, ecs_query_t *query,
             bool active = is_3d
                               ? ecs_field(&it, MyeCamera3D, 0)[i].active
                               : ecs_field(&it, MyeCamera2D, 0)[i].active;
-            if (!active) {
-                continue;
-            }
-            ++active_count;
-            if (found == 0) {
-                found = it.entities[i];
+            if (active) {
+                ecs_entity_t found = it.entities[i];
+                ecs_iter_fini(&it);
+                return found;
             }
         }
     }
-
-    if (active_count > 1 && !*warned) {
-        *warned = true;
-        const char *name = ecs_get_name(world, found);
-        mye_log_warn("camera: %d active %s cameras; using '%s'. Mark exactly "
-                     "one active -- which one wins is otherwise arbitrary.",
-                     active_count, is_3d ? "3D" : "2D",
-                     name != NULL ? name : "<unnamed>");
-    }
-    return found;
+    return 0;
 }
 
 bool mye_camera3d_active(const ecs_world_t *world, Camera3D *out,
@@ -212,8 +200,10 @@ bool mye_camera3d_active(const ecs_world_t *world, Camera3D *out,
     if (state == NULL) {
         return false;
     }
-    ecs_entity_t e = first_active(world, state->cameras3d, true,
-                                  &state->warned_multiple_3d);
+    const MyeRender3dConfig *config =
+        ecs_singleton_get(world, MyeRender3dConfig);
+    ecs_entity_t e = view_camera(world, state->cameras3d,
+                                 config != NULL ? config->camera : 0, true);
     if (out_entity != NULL) {
         *out_entity = e;
     }
@@ -227,8 +217,9 @@ bool mye_camera2d_active(const ecs_world_t *world, Camera2D *out,
     if (state == NULL) {
         return false;
     }
-    ecs_entity_t e = first_active(world, state->cameras2d, false,
-                                  &state->warned_multiple_2d);
+    const MyeRenderConfig *config = ecs_singleton_get(world, MyeRenderConfig);
+    ecs_entity_t e = view_camera(world, state->cameras2d,
+                                 config != NULL ? config->camera : 0, false);
     if (out_entity != NULL) {
         *out_entity = e;
     }

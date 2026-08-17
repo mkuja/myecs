@@ -97,9 +97,15 @@ bool mye_camera3d_resolve(const ecs_world_t *world, ecs_entity_t camera,
 bool mye_camera2d_resolve(const ecs_world_t *world, ecs_entity_t camera,
                           Camera2D *out);
 
-/* The first camera marked active. False when a scene has none: the 3D pass
- * then draws nothing, and the 2D pass falls back to an identity view.
- * `out_entity` may be NULL. */
+/* The camera the built-in pass looks through: the one named in
+ * MyeRender3dConfig.camera / MyeRenderConfig.camera, else the first active
+ * one. False when there is none: the 3D pass then draws nothing, and the 2D
+ * pass falls back to an identity view. `out_entity` may be NULL.
+ *
+ * A game may have any number of cameras -- a main view, a minimap, a
+ * cutscene rig on standby. That is its business; the engine picks nothing
+ * and warns about nothing beyond honouring the config field. The other
+ * cameras are the game's to draw with, through mye_camera3d_resolve. */
 bool mye_camera3d_active(const ecs_world_t *world, Camera3D *out,
                          ecs_entity_t *out_entity);
 bool mye_camera2d_active(const ecs_world_t *world, Camera2D *out,

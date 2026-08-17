@@ -650,9 +650,11 @@ Add `MyeHidden` to skip an entity when drawing without deleting it.
 ### The 2D camera
 
 Sprites are drawn in **world** space, inside raylib's `BeginMode2D`. Which
-camera that uses is an entity with `MyeCamera2D` marked `active` — the engine
-takes the first one it finds, and falls back to an identity view if there is
-none, so a game without a camera still draws.
+camera that uses is an entity with `MyeCamera2D`. With one camera that is
+all there is to it. With several — a main view and a minimap — name the main
+one in `MyeRenderConfig.camera`; the others are yours to draw with. With none,
+the pass falls back to an identity view, so a game without a camera still
+draws.
 
 A camera is an ordinary entity in the transform hierarchy: **where it is comes
 from its position**, and the component only says what a camera *is* — zoom,

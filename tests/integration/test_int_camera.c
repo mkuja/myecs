@@ -408,33 +408,47 @@ TEST(no_active_camera_is_reported_rather_than_guessed)
     ASSERT_EQ_INT(0, mye_shutdown(world));
 }
 
-/* Which camera wins is otherwise arbitrary but stable, which looks
- * deliberate until the day it changes. */
-TEST(more_than_one_active_camera_warns_once)
+/* Several cameras is an ordinary thing to have -- a main view and a minimap.
+ * The engine does not arbitrate: the game names the main view in its render
+ * config, and nothing is said about the rest. */
+TEST(with_several_cameras_the_configured_one_is_the_view_and_nobody_complains)
 {
     ecs_world_t *world = make_world();
     ASSERT_TRUE(world != NULL);
 
-    mye_camera3d_spawn(world, (Vector3){ 0.0f, 0.0f, 5.0f },
-                       (Vector3){ 0.0f, 0.0f, 0.0f }, 60.0f);
-    mye_camera3d_spawn(world, (Vector3){ 0.0f, 0.0f, 9.0f },
-                       (Vector3){ 0.0f, 0.0f, 0.0f }, 60.0f);
+    ecs_entity_t main_view = mye_camera3d_spawn(
+        world, (Vector3){ 0.0f, 2.0f, 8.0f }, (Vector3){ 0.0f, 0.0f, 0.0f }, 60.0f);
+    ecs_entity_t minimap = mye_camera3d_spawn(
+        world, (Vector3){ 0.0f, 200.0f, 0.0f }, (Vector3){ 0.0f, 0.0f, 0.0f }, 30.0f);
+    (void)main_view;
+    mye_progress(world, FIXED_DT);
 
     mye_log_counts before = mye_log_get_counts();
-    Camera3D c;
-    ASSERT_TRUE(mye_camera3d_active(world, &c, NULL));
-    mye_log_counts after_first = mye_log_get_counts();
-    ASSERT_TRUE(after_first.warn > before.warn);
 
-    /* Latched: it does not warn every frame for the rest of the run. */
-    for (int i = 0; i < 5; ++i) {
-        mye_camera3d_active(world, &c, NULL);
-    }
-    ASSERT_EQ_U64(after_first.warn, mye_log_get_counts().warn);
+    /* Nothing configured: the first active one, deterministically. */
+    ecs_entity_t who = 0;
+    Camera3D c;
+    ASSERT_TRUE(mye_camera3d_active(world, &c, &who));
+    ASSERT_TRUE(who == main_view);
+
+    /* Configured: that one, regardless of order. */
+    MyeRender3dConfig *config = ecs_singleton_ensure(world, MyeRender3dConfig);
+    config->camera = minimap;
+    ecs_singleton_modified(world, MyeRender3dConfig);
+    ASSERT_TRUE(mye_camera3d_active(world, &c, &who));
+    ASSERT_TRUE(who == minimap);
+    ASSERT_NEAR(200.0f, c.position.y, 0.001f);
+
+    /* And the other camera is still resolvable for the game's own use. */
+    Camera3D other;
+    ASSERT_TRUE(mye_camera3d_resolve(world, main_view, &other));
+    ASSERT_NEAR(2.0f, other.position.y, 0.001f);
+
+    /* Not a warning in sight. */
+    ASSERT_EQ_U64(before.warn, mye_log_get_counts().warn);
 
     ASSERT_EQ_INT(0, mye_shutdown(world));
 }
-
 
 /* --- gaps a review found ------------------------------------------------- */
 
@@ -665,7 +679,7 @@ TEST_MAIN(TEST_CASE(a_root_camera_resolves_to_its_own_position_and_fov),
           TEST_CASE(screen_and_world_round_trip_through_a_2d_camera),
           TEST_CASE(a_camera_with_no_transform_components_still_resolves),
           TEST_CASE(no_active_camera_is_reported_rather_than_guessed),
-          TEST_CASE(more_than_one_active_camera_warns_once),
+          TEST_CASE(with_several_cameras_the_configured_one_is_the_view_and_nobody_complains),
           TEST_CASE(render_position_blends_an_interpolated_sprite_outside_the_hierarchy),
           TEST_CASE(render_rotation_is_a_pure_rotation_even_for_a_scaled_entity),
           TEST_CASE(a_parented_follow_camera_lands_on_the_target_not_beside_it),
