@@ -1,5 +1,7 @@
 #include "render/render2d.h"
 
+#include "render/camera.h"
+
 #include "core/log.h"
 
 #include <raymath.h>
@@ -18,7 +20,6 @@ ECS_COMPONENT_DECLARE(MyeRenderConfig);
  * singleton rather than a global so two worlds cannot clobber each other. */
 typedef struct MyeRender2dState {
     ecs_query_t *sprites;
-    ecs_query_t *cameras;
 } MyeRender2dState;
 
 ECS_COMPONENT_DECLARE(MyeRender2dState);
@@ -63,27 +64,10 @@ static int compare_draw_items(const void *lhs, const void *rhs)
 
 static Camera2D active_camera(ecs_world_t *world)
 {
+    /* Identity view when a scene has no camera, so a game that never sets
+     * one still draws in world coordinates. */
     Camera2D camera = { .zoom = 1.0f };
-    const MyeRender2dState *state = render_state(world);
-    if (state == NULL || state->cameras == NULL) {
-        return camera;
-    }
-
-    ecs_iter_t it = ecs_query_iter(world, state->cameras);
-    while (ecs_query_next(&it)) {
-        const MyeCamera2D *cams = ecs_field(&it, MyeCamera2D, 0);
-        for (int i = 0; i < it.count; ++i) {
-            if (!cams[i].active) {
-                continue;
-            }
-            camera = cams[i].camera;
-            if (camera.zoom == 0.0f) {
-                camera.zoom = 1.0f; /* a zero-zoom camera would show nothing */
-            }
-            ecs_iter_fini(&it);
-            return camera;
-        }
-    }
+    mye_camera2d_active(world, &camera, NULL);
     return camera;
 }
 
@@ -458,10 +442,6 @@ static void render2d_fini(ecs_world_t *world, void *ctx)
         ecs_query_fini(state->sprites);
         state->sprites = NULL;
     }
-    if (state->cameras != NULL) {
-        ecs_query_fini(state->cameras);
-        state->cameras = NULL;
-    }
 }
 
 void MyeRender2dModuleImport(ecs_world_t *world)
@@ -502,9 +482,6 @@ void MyeRender2dModuleImport(ecs_world_t *world)
               .oper = EcsOptional },
             { .id = ecs_id(MyeHidden), .oper = EcsNot },
         },
-    });
-    state->cameras = ecs_query(world, {
-        .terms = {{ .id = ecs_id(MyeCamera2D), .inout = EcsIn }},
     });
 
     /* Headless worlds get the components, queries and phases -- so gameplay

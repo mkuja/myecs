@@ -164,6 +164,62 @@ milestone of its own -- everything still floats), **point/spot lights**
 (position plus distance falloff, about an hour), and **image-based lighting**
 (an environment map, which is what makes PBR metals really sing).
 
+## Cameras
+
+A camera is an entity in the transform hierarchy. Its position and rotation
+come from `MyePosition`/`MyeRotation` and its parents; `MyeCamera2D` and
+`MyeCamera3D` carry only what a camera *is* -- field of view, projection,
+zoom, and which one is active.
+
+That single decision is what makes the two things games want fall out of
+machinery that already exists: **parent a camera** and it is rigidly carried,
+turning as well as moving (first-person, turret sight, rollercoaster);
+**add `MyeCameraFollow`** and it chases a target with framerate-independent
+lag.
+
+**Orientation is a rotation, not a stored target point.** A target is a point
+in some coordinate space, and once a camera is parented that space is
+ambiguous -- the same target would mean two different directions depending on
+where the parent is. `mye_camera_look_at()` provides the convenient form: it
+takes a world point, converts it into the camera's own space, and writes the
+rotation. Skip that conversion and a parented camera aims using two different
+coordinate systems, which points it at nothing; there is a test for exactly
+that (`look_at_is_correct_for_a_parented_camera`).
+
+**The view is resolved on demand, never stored.** `mye_camera3d_resolve()` is
+a pure function of the camera's components and its parent's render transform.
+The renderer and the screen/world helpers both call it, so they cannot
+disagree, and there is no cached matrix to go stale.
+
+### Ordering: the MyeOnCamera phase
+
+Camera logic runs in its own phase, between `EcsOnStore` and `MyeOnDraw3D`:
+
+```text
+EcsPostUpdate   transforms propagated
+EcsPreStore     render transforms blended (interpolation)
+MyeOnCamera     follow / orbit / shake systems  <-- here
+MyeOnDraw3D     the 3D pass reads the resolved camera
+```
+
+flecs orders systems by phase, not by hierarchy -- parenting a camera to a
+player does *not* make a follow system run after the player moves. The phase
+is what makes "positions first, then the camera" a guarantee rather than an
+accident of registration order.
+
+It also means a follow camera reads its target's **drawn** position
+(`mye_render_position`), not the simulated one. Mid-step those differ, and
+following the simulated position makes the world shimmer against a player who
+is perfectly smooth.
+
+### The one caveat
+
+A camera moved during `MyeOnCamera` is moved *after* propagation ran, so its
+own world matrix is a frame stale until the next frame. Nothing that draws is
+affected, because resolving recomputes from components -- but anything
+parented *to* such a camera lags a frame. Parent cameras to things; do not
+parent things to a following camera.
+
 ## What we deliberately postpone
 
 - Custom shader/material system (Tier 3) — raylib `Material` + default shader

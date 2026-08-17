@@ -12,6 +12,7 @@
  */
 #include "core/engine.h"
 #include "render/render2d.h"
+#include "render/camera.h"
 #include "render/render3d.h"
 #include "scene/transform.h"
 

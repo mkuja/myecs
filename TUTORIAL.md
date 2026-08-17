@@ -651,42 +651,94 @@ Add `MyeHidden` to skip an entity when drawing without deleting it.
 
 Sprites are drawn in **world** space, inside raylib's `BeginMode2D`. Which
 camera that uses is an entity with `MyeCamera2D` marked `active` — the engine
-takes the first one it finds, and falls back to an identity camera at zoom 1 if
-there is none, so a game without a camera still draws.
+takes the first one it finds, and falls back to an identity view if there is
+none, so a game without a camera still draws.
+
+A camera is an ordinary entity in the transform hierarchy: **where it is comes
+from its position**, and the component only says what a camera *is* — zoom,
+rotation, and where on screen its position lands.
+
+```c ctx
+/* Centred on the middle of the level, at 1:1. The offset defaults to the
+ * centre of the window, so the camera's position is what you see in the
+ * middle of the screen. */
+camera = mye_camera2d_spawn(world, (Vector2){ 500.0f, 320.0f }, 1.0f);
+```
 
 `MyeOnDrawUI` runs outside `BeginMode2D`, which is why a HUD registered there
 stays put while the world scrolls underneath it.
 
+### Following something
+
+Add `MyeCameraFollow` — no system to write:
+
 ```c ctx
-ecs_entity_t camera = mye_entity_new(world);
-ecs_set(world, camera, MyeCamera2D,
-        { .camera = { .offset = { 500.0f, 320.0f },   /* screen centre */
-                      .target = { 0.0f, 0.0f },       /* world point shown there */
-                      .rotation = 0.0f, .zoom = 1.0f },
-          .active = true });
+ecs_set(world, camera, MyeCameraFollow,
+        { .target = player,
+          /* 0 snaps exactly; ~8 lags gently; ~20 is nearly rigid. The lag is
+           * framerate-independent, so it looks the same at 30 and 240 fps. */
+          .stiffness = 8.0f });
 ```
 
-To follow the player, write `target` each frame from the player's position —
-in `EcsOnUpdate`, not a fixed step, so the camera tracks the interpolated
-picture rather than the stepped one:
+The lag matters more than it sounds: a camera welded to the player makes the
+*world* look like it is sliding around, because the one fixed thing on screen
+is the thing you are steering. A little slack reads as the camera chasing.
+
+Two things this does that are easy to get wrong by hand:
+
+- It follows the player's **drawn** position, not the simulated one. With
+  interpolation on (§5) those differ mid-step, and following the simulated
+  position makes the whole world shimmer against a player who is perfectly
+  smooth.
+- It runs in the `MyeOnCamera` phase, after transforms are propagated and
+  blended. A follow system in `EcsOnUpdate` reads a position from *before* the
+  player moved this frame, so the camera is permanently a frame behind.
+
+Write your own camera logic — an orbit, a cutscene rig — in that same phase:
 
 ```c file
-static void CameraFollow(ecs_iter_t *it)
+static void ShakeCamera(ecs_iter_t *it)
 {
-    MyeCamera2D *cam = ecs_field(it, MyeCamera2D, 0);
-    ecs_entity_t player = ecs_lookup(it->world, "player");
-    const MyePosition2D *pos = player ? ecs_get(it->world, player, MyePosition2D)
-                                      : NULL;
-    if (pos == NULL) return;
-
+    MyePosition2D *pos = ecs_field(it, MyePosition2D, 0);
     for (int i = 0; i < it->count; ++i) {
-        cam[i].camera.target = (Vector2){ pos->x, pos->y };
+        pos[i].x += (float)GetRandomValue(-2, 2);
     }
+}
+
+static void register_shake(ecs_world_t *world)
+{
+    ECS_SYSTEM(world, ShakeCamera, MyeOnCamera, MyePosition2D, MyeCamera2D);
 }
 ```
 
-A zero `zoom` would show nothing, so the engine treats it as 1 rather than
-silently drawing a blank screen.
+### Rigid attachment is just parenting
+
+For a camera that is genuinely welded to something — a first-person view, a
+turret sight — parent it and write nothing at all:
+
+```c ctx
+mye_set_parent(world, camera, player);
+```
+
+It now moves *and turns* with the player, because the hierarchy composes
+rotation (§9), not just position.
+
+### Screen and world
+
+Clicking on things needs the reverse of drawing:
+
+```c ctx
+Vector2 mouse = GetMousePosition();
+Vector2 in_world = mye_screen_to_world_2d(world, mouse);
+
+/* And back, to put a marker on screen over a world object. */
+Vector2 on_screen = mye_world_to_screen_2d(world, in_world);
+(void)on_screen;
+```
+
+The 3D equivalents are `mye_screen_ray` (what to intersect for picking) and
+`mye_world_to_screen`. A zero `zoom` would show nothing, so the engine treats
+it as 1 rather than silently drawing a blank screen.
 
 ---
 
@@ -1080,6 +1132,7 @@ entity rather than in which code path runs.
 /* scene3d.c -- a lit, rotating cube with a ground grid. */
 #include "asset/asset.h"
 #include "core/engine.h"
+#include "render/camera.h"
 #include "render/render3d.h"
 #include "scene/transform.h"
 
@@ -1127,6 +1180,27 @@ int main(void)
 
 `mye_mesh_spawn` and `mye_camera3d_spawn` are conveniences; both just add
 components you could add yourself.
+
+A 3D camera is placed by its transform, exactly like the 2D one (§8), so
+everything there applies: `MyeCameraFollow` to chase something,
+`mye_set_parent` to weld it on, and camera logic in the `MyeOnCamera` phase.
+Two things are 3D-specific:
+
+```c ctx
+/* Aim it. The target is a WORLD point, converted into the camera's own space
+ * internally -- so this stays correct for a camera parented to a moving,
+ * turning vehicle. */
+mye_camera_look_at(world, camera, (Vector3){ 0.0f, 1.0f, 0.0f });
+
+/* Field of view, in degrees. Narrowing it is a zoom; widening it during a
+ * sprint is the classic speed effect. Clamped, because a zero fov renders
+ * nothing and looks like a crash. */
+mye_camera_set_fov(world, camera, 45.0f);
+```
+
+An orbit camera is a camera parented to an invisible pivot: rotate the pivot
+and the camera swings around it, with no trigonometry anywhere.
+`examples/03_scene3d` does exactly that.
 
 ### Two shaders
 
@@ -1605,6 +1679,7 @@ What it uses, and where to look in the listing:
 #include "core/log.h"
 #include "core/rl_alloc.h"
 #include "input/input.h"
+#include "render/camera.h"
 #include "render/render2d.h"
 #include "scene/scene.h"
 #include "scene/transform.h"
@@ -1943,6 +2018,16 @@ static void play_load(ecs_world_t *world, void *user)
             { .texture = game->tex_shield, .origin = { 8.0f, 8.0f },
               .tint = WHITE, .layer = 9 });
     mye_set_parent(world, shield, player);
+
+    /* A camera that follows the player rather than being parented to it, so
+     * it can lag slightly -- rigid attachment reads as the world sliding
+     * about. It tracks the player's DRAWN position, so the blend from
+     * MyeInterpolate is what the camera sees. Zoomed in, so the view
+     * genuinely scrolls. */
+    ecs_entity_t camera = mye_camera2d_spawn(
+        world, (Vector2){ SCREEN_W / 2.0f, SCREEN_H / 2.0f }, 1.4f);
+    ecs_set(world, camera, MyeCameraFollow,
+            { .target = player, .stiffness = 6.0f });
 
     for (int i = 0; i < ORB_COUNT; ++i) {
         ecs_entity_t orb = ecs_new_w_pair(world, EcsIsA, game->prefab_orb);

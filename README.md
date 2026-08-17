@@ -117,8 +117,9 @@ rendering. Use it rather than `ecs_progress`.
 | `engine/input` | actions rather than key codes; replayable |
 | `engine/asset` | handle-based registry, scene-scoped loading |
 | `engine/audio` | sound queue, deduplicated per frame |
-| `engine/render/render2d` | sprites, animation, camera, layer/y sorting |
-| `engine/render/render3d` | meshes, camera, directional lights |
+| `engine/render/render2d` | sprites, animation, layer/y sorting |
+| `engine/render/render3d` | meshes, directional lights, Blinn-Phong and PBR |
+| `engine/render/camera` | cameras in the transform hierarchy, following, screen/world |
 | `engine/scene/transform` | parent-child hierarchy shared by 2D and 3D |
 | `engine/scene/scene` | load, unload, switch; scene-owned entities and assets |
 | `engine/scene/serialize` | world and scene state to and from JSON |

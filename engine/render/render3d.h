@@ -37,9 +37,13 @@ typedef struct MyeMeshInstance {
     Color tint;
 } MyeMeshInstance;
 
-/* The active 3D camera. The first entity with `active` set is used. */
+/* Marks an entity as a 3D camera. Where it is and which way it faces come
+ * from the entity's transform, so a camera is placed and parented like
+ * anything else -- see render/camera.h. The first one marked active is the
+ * one that draws. */
 typedef struct MyeCamera3D {
-    Camera3D camera;
+    float fov;       /* vertical, degrees; 0 is treated as 60 */
+    int projection;  /* CAMERA_PERSPECTIVE or CAMERA_ORTHOGRAPHIC */
     bool active;
 } MyeCamera3D;
 
@@ -80,8 +84,7 @@ void MyeRender3dModuleImport(ecs_world_t *world);
 ecs_entity_t mye_mesh_spawn(ecs_world_t *world, mye_model model,
                             Vector3 position, Color tint);
 
-/* Spawns a camera looking at `target` from `position`, marked active. */
-ecs_entity_t mye_camera3d_spawn(ecs_world_t *world, Vector3 position,
-                                Vector3 target, float fov_degrees);
+/* Cameras live in render/camera.h: mye_camera3d_spawn, mye_camera_look_at,
+ * mye_camera_set_fov, MyeCameraFollow, and the screen/world helpers. */
 
 #endif /* MYE_RENDER_RENDER3D_H */

@@ -153,6 +153,62 @@ Vector3 mye_world_position(const ecs_world_t *world, ecs_entity_t entity)
     return mye_matrix_translation(t->m);
 }
 
+Vector3 mye_render_position(const ecs_world_t *world, ecs_entity_t entity)
+{
+    const MyeRenderTransform *r = ecs_get(world, entity, MyeRenderTransform);
+    if (r != NULL) {
+        return mye_matrix_translation(r->m);
+    }
+
+    /* Not in the hierarchy: answer with whatever placement it does have,
+     * rather than reporting the origin and sending a camera there. */
+    const MyeWorldTransform *w = ecs_get(world, entity, MyeWorldTransform);
+    if (w != NULL) {
+        return mye_matrix_translation(w->m);
+    }
+    const MyePosition3D *p3 = ecs_get(world, entity, MyePosition3D);
+    if (p3 != NULL) {
+        return p3->v;
+    }
+    const MyePosition2D *p2 = ecs_get(world, entity, MyePosition2D);
+    if (p2 != NULL) {
+        return (Vector3){ p2->x, p2->y, 0.0f };
+    }
+    return (Vector3){ 0.0f, 0.0f, 0.0f };
+}
+
+Quaternion mye_render_rotation(const ecs_world_t *world, ecs_entity_t entity)
+{
+    const MyeRenderTransform *r = ecs_get(world, entity, MyeRenderTransform);
+    const MyeWorldTransform *w =
+        r == NULL ? ecs_get(world, entity, MyeWorldTransform) : NULL;
+    if (r != NULL || w != NULL) {
+        return QuaternionFromMatrix(r != NULL ? r->m : w->m);
+    }
+
+    const MyeRotation3D *rot3 = ecs_get(world, entity, MyeRotation3D);
+    if (rot3 != NULL) {
+        return rot3->q;
+    }
+    const MyeRotation2D *rot2 = ecs_get(world, entity, MyeRotation2D);
+    if (rot2 != NULL) {
+        return QuaternionFromAxisAngle((Vector3){ 0.0f, 0.0f, 1.0f },
+                                       rot2->angle);
+    }
+    return QuaternionIdentity();
+}
+
+ecs_entity_t mye_spawn_2d(ecs_world_t *world, Vector2 position)
+{
+    ecs_entity_t e = mye_entity_new(world);
+    ecs_set(world, e, MyePosition2D, { position.x, position.y });
+    ecs_set(world, e, MyeRotation2D, { 0.0f });
+    ecs_set(world, e, MyeScale2D, { 1.0f, 1.0f });
+    ecs_set(world, e, MyeLocalTransform, { MatrixIdentity() });
+    ecs_set(world, e, MyeWorldTransform, { MatrixIdentity() });
+    return e;
+}
+
 /* ------------------------------------------------------------- lifecycle -- */
 
 void MyeTransformModuleImport(ecs_world_t *world)

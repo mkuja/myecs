@@ -6,6 +6,7 @@
 #include "asset/asset.h"
 #include "audio/audio.h"
 #include "input/input.h"
+#include "render/camera.h"
 #include "render/render2d.h"
 #include "render/render3d.h"
 #include "scene/scene.h"
@@ -96,6 +97,7 @@ static void MyeTimeUpdate(ecs_iter_t *it)
 }
 
 ecs_entity_t MyeOnFixedUpdate = 0;
+ecs_entity_t MyeOnCamera = 0;
 ecs_entity_t MyeOnDraw3D = 0;
 ecs_entity_t MyeOnDraw2D = 0;
 ecs_entity_t MyeOnDrawUI = 0;
@@ -105,9 +107,17 @@ ecs_entity_t MyeOnRenderEnd = 0;
  * independently of the order modules happen to be imported in. */
 static void create_render_phases(ecs_world_t *world)
 {
+    /* Camera systems run here: after transforms are propagated
+     * (EcsPostUpdate) and blended for display (EcsPreStore), before anything
+     * is drawn. A follow system registered in this phase therefore reads a
+     * target's final, interpolated position for this frame -- an ordering
+     * guarantee, not a hope. See render/camera.h. */
+    MyeOnCamera = ecs_entity(world, {
+        .name = "MyeOnCamera",
+        .add = ecs_ids(EcsPhase, ecs_dependson(EcsOnStore)) });
     MyeOnDraw3D = ecs_entity(world, {
         .name = "MyeOnDraw3D",
-        .add = ecs_ids(EcsPhase, ecs_dependson(EcsOnStore)) });
+        .add = ecs_ids(EcsPhase, ecs_dependson(MyeOnCamera)) });
     MyeOnDraw2D = ecs_entity(world, {
         .name = "MyeOnDraw2D",
         .add = ecs_ids(EcsPhase, ecs_dependson(MyeOnDraw3D)) });
@@ -205,6 +215,8 @@ ecs_world_t *mye_init(const mye_config *config)
     }
 
     engine->base = base;
+    engine->width = cfg.width;
+    engine->height = cfg.height;
     mye_tracking_init(&engine->tracking, base);
     engine->allocator = mye_tracking_allocator(&engine->tracking);
     engine->headless = cfg.headless;
@@ -290,6 +302,11 @@ ecs_world_t *mye_init(const mye_config *config)
     ECS_IMPORT(world, MyeSceneModule);
     mye_serialize_register_engine_components(world);
     ECS_IMPORT(world, MyeRender3dModule);
+    /* After both renderers: the camera components belong to them, and a
+     * query cannot name a component that is not registered yet. The
+     * renderers only call into this module at runtime, so nothing needs it
+     * earlier. */
+    ECS_IMPORT(world, MyeCameraModule);
     ECS_IMPORT(world, MyeDebugOverlayModule);
 
     return world;

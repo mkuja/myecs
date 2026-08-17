@@ -13,6 +13,7 @@
 #include "core/log.h"
 #include "core/rl_alloc.h"
 #include "input/input.h"
+#include "render/camera.h"
 #include "render/render2d.h"
 #include "scene/scene.h"
 #include "scene/transform.h"
@@ -351,6 +352,16 @@ static void play_load(ecs_world_t *world, void *user)
             { .texture = game->tex_shield, .origin = { 8.0f, 8.0f },
               .tint = WHITE, .layer = 9 });
     mye_set_parent(world, shield, player);
+
+    /* A camera that follows the player rather than being parented to it, so
+     * it can lag slightly -- rigid attachment reads as the world sliding
+     * about. It tracks the player's DRAWN position, so the blend from
+     * MyeInterpolate is what the camera sees. Zoomed in, so the view
+     * genuinely scrolls. */
+    ecs_entity_t camera = mye_camera2d_spawn(
+        world, (Vector2){ SCREEN_W / 2.0f, SCREEN_H / 2.0f }, 1.4f);
+    ecs_set(world, camera, MyeCameraFollow,
+            { .target = player, .stiffness = 6.0f });
 
     for (int i = 0; i < ORB_COUNT; ++i) {
         ecs_entity_t orb = ecs_new_w_pair(world, EcsIsA, game->prefab_orb);

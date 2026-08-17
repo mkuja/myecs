@@ -10,12 +10,14 @@
  * model files.
  *
  * Controls: arrow keys / WASD orbit the camera, Q and E change height,
+ * Z and X change field of view,
  * G toggles the ground grid, SPACE pauses the animation.
  */
 #include "asset/asset.h"
 #include "core/engine.h"
 #include "input/input.h"
 #include "render/render2d.h"
+#include "render/camera.h"
 #include "render/render3d.h"
 #include "scene/transform.h"
 
@@ -32,6 +34,7 @@ enum {
     ACT_ORBIT = 0, /* axis: -1 left, +1 right */
     ACT_PITCH,     /* axis: -1 down, +1 up */
     ACT_HEIGHT,    /* axis: -1 lower, +1 raise */
+    ACT_FOV,       /* axis: -1 narrow, +1 wide */
     ACT_TOGGLE_GRID,
     ACT_PAUSE,
 };
@@ -54,6 +57,7 @@ typedef struct Bob {
 
 typedef struct SceneState {
     ecs_entity_t camera;
+    ecs_entity_t pivot;
     float orbit_angle;
     float orbit_distance;
     float camera_height;
@@ -104,7 +108,11 @@ static void BobSystem(ecs_iter_t *it)
     }
 }
 
-/* Orbit camera: reads actions, writes the camera component. */
+/* Orbit camera. The camera is a CHILD of an invisible pivot at the scene's
+ * centre: rotating the pivot swings the camera around it, because the
+ * transform hierarchy composes rotation. Nothing here computes a position --
+ * only the pivot's yaw and the camera's local offset. Runs in MyeOnCamera,
+ * after transforms are propagated. */
 static void CameraControl(ecs_iter_t *it)
 {
     SceneState *scene = ecs_field(it, SceneState, 0);
@@ -120,16 +128,18 @@ static void CameraControl(ecs_iter_t *it)
     if (scene->camera_height < 1.0f) scene->camera_height = 1.0f;
     if (scene->camera_height > 30.0f) scene->camera_height = 30.0f;
 
-    MyeCamera3D *cam = ecs_ensure(world, scene->camera, MyeCamera3D);
-    if (cam != NULL) {
-        cam->camera.position = (Vector3){
-            cosf(scene->orbit_angle) * scene->orbit_distance,
-            scene->camera_height,
-            sinf(scene->orbit_angle) * scene->orbit_distance,
-        };
-        cam->camera.target = (Vector3){ 0.0f, 2.0f, 0.0f };
-        ecs_modified(world, scene->camera, MyeCamera3D);
-    }
+    ecs_set(world, scene->pivot, MyeRotation3D,
+            { QuaternionFromAxisAngle((Vector3){ 0.0f, 1.0f, 0.0f },
+                                      scene->orbit_angle) });
+
+    /* Local to the pivot, so the yaw above carries it around. */
+    ecs_set(world, scene->camera, MyePosition3D,
+            { { 0.0f, scene->camera_height, scene->orbit_distance } });
+    mye_camera_look_at(world, scene->camera, (Vector3){ 0.0f, 2.0f, 0.0f });
+
+    float fov = mye_camera_get_fov(world, scene->camera);
+    fov += mye_action_value(world, ACT_FOV) * 30.0f * dt;
+    mye_camera_set_fov(world, scene->camera, fov);
 
     if (mye_action_pressed(world, ACT_PAUSE)) {
         scene->paused = !scene->paused;
@@ -271,6 +281,7 @@ int main(void)
     mye_input_bind_axis_keys(world, ACT_PITCH, KEY_DOWN, KEY_UP);
     mye_input_bind_axis_keys(world, ACT_PITCH, KEY_S, KEY_W);
     mye_input_bind_axis_keys(world, ACT_HEIGHT, KEY_Q, KEY_E);
+    mye_input_bind_axis_keys(world, ACT_FOV, KEY_Z, KEY_X);
     mye_input_bind_key(world, ACT_TOGGLE_GRID, KEY_G);
     mye_input_bind_key(world, ACT_PAUSE, KEY_SPACE);
 
@@ -279,15 +290,19 @@ int main(void)
                         .orbit_distance = 22.0f,
                         .camera_height = 9.0f });
     SceneState *scene = ecs_singleton_ensure(world, SceneState);
-    scene->camera = mye_camera3d_spawn(world, (Vector3){ 16.0f, 9.0f, 16.0f },
-                                       (Vector3){ 0.0f, 2.0f, 0.0f }, 50.0f);
+    /* The pivot is just a transform: no mesh, nothing drawn. Parenting the
+     * camera to it turns orbiting into "rotate the pivot". */
+    scene->pivot = mye_spawn_3d(world, (Vector3){ 0.0f, 2.0f, 0.0f });
+    scene->camera = mye_camera3d_spawn(world, (Vector3){ 0.0f, 9.0f, 22.0f },
+                                       (Vector3){ 0.0f, 0.0f, 0.0f }, 50.0f);
+    mye_set_parent(world, scene->camera, scene->pivot);
 
     build_scene(world);
 
     /* Animation on the fixed step: framerate-independent, like the 2D game. */
     ECS_SYSTEM(world, SpinSystem, MyeOnFixedUpdate, Spin, MyeRotation3D);
     ECS_SYSTEM(world, BobSystem, MyeOnFixedUpdate, Bob, MyePosition3D);
-    ECS_SYSTEM(world, CameraControl, EcsOnUpdate, SceneState);
+    ECS_SYSTEM(world, CameraControl, MyeOnCamera, SceneState);
     ECS_SYSTEM(world, DrawHud, MyeOnDrawUI, [in] SceneState);
 
     /* A darker sky than the 2D default suits a lit 3D scene. */

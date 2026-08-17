@@ -1,5 +1,7 @@
 #include "render/render3d.h"
 
+#include "render/camera.h"
+
 #include "render/render2d.h" /* MyeHidden is shared by both renderers */
 
 #include "core/log.h"
@@ -17,7 +19,6 @@ ECS_COMPONENT_DECLARE(MyeRender3dConfig);
 /* Queries built once at import, like the 2D renderer's. */
 typedef struct MyeRender3dState {
     ecs_query_t *meshes;
-    ecs_query_t *cameras;
     ecs_query_t *lights;
     Shader shader;
     bool shader_ready;
@@ -279,26 +280,6 @@ static const MyeRender3dState *render3d_state(const ecs_world_t *world)
     return ecs_singleton_get(world, MyeRender3dState);
 }
 
-static bool find_active_camera(ecs_world_t *world, Camera3D *out)
-{
-    const MyeRender3dState *state = render3d_state(world);
-    if (state == NULL || state->cameras == NULL) {
-        return false;
-    }
-
-    ecs_iter_t it = ecs_query_iter(world, state->cameras);
-    while (ecs_query_next(&it)) {
-        const MyeCamera3D *cams = ecs_field(&it, MyeCamera3D, 0);
-        for (int i = 0; i < it.count; ++i) {
-            if (cams[i].active) {
-                *out = cams[i].camera;
-                ecs_iter_fini(&it);
-                return true;
-            }
-        }
-    }
-    return false;
-}
 
 /* Pushes light state into the shader. Lights beyond MYE_MAX_LIGHTS, and
  * disabled ones, are switched off rather than silently dropped. */
@@ -372,7 +353,7 @@ static void MyeRender3dPass(ecs_iter_t *it)
     }
 
     Camera3D camera;
-    if (!find_active_camera(world, &camera)) {
+    if (!mye_camera3d_active(world, &camera, NULL)) {
         return; /* nothing to look through: skip the pass entirely */
     }
 
@@ -509,20 +490,6 @@ ecs_entity_t mye_mesh_spawn(ecs_world_t *world, mye_model model,
     return e;
 }
 
-ecs_entity_t mye_camera3d_spawn(ecs_world_t *world, Vector3 position,
-                                Vector3 target, float fov_degrees)
-{
-    ecs_entity_t e = mye_entity_new(world);
-    ecs_set(world, e, MyeCamera3D,
-            { .camera = { .position = position,
-                          .target = target,
-                          .up = { 0.0f, 1.0f, 0.0f },
-                          .fovy = fov_degrees,
-                          .projection = CAMERA_PERSPECTIVE },
-              .active = true });
-    return e;
-}
-
 /* ------------------------------------------------------------- lifecycle -- */
 
 static void render3d_fini(ecs_world_t *world, void *ctx)
@@ -533,7 +500,6 @@ static void render3d_fini(ecs_world_t *world, void *ctx)
         return;
     }
     if (state->meshes != NULL) ecs_query_fini(state->meshes);
-    if (state->cameras != NULL) ecs_query_fini(state->cameras);
     if (state->lights != NULL) ecs_query_fini(state->lights);
     if (state->shader_ready) {
         UnloadShader(state->shader);
@@ -544,7 +510,6 @@ static void render3d_fini(ecs_world_t *world, void *ctx)
         state->pbr_ready = false;
     }
     state->meshes = NULL;
-    state->cameras = NULL;
     state->lights = NULL;
 }
 
@@ -577,9 +542,6 @@ void MyeRender3dModuleImport(ecs_world_t *world)
             { .id = ecs_id(MyeWorldTransform), .inout = EcsIn },
             { .id = ecs_id(MyeHidden), .oper = EcsNot },
         },
-    });
-    state->cameras = ecs_query(world, {
-        .terms = {{ .id = ecs_id(MyeCamera3D), .inout = EcsIn }},
     });
     state->lights = ecs_query(world, {
         .terms = {{ .id = ecs_id(MyeLight), .inout = EcsIn }},

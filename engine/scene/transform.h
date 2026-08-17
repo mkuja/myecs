@@ -100,8 +100,33 @@ void mye_set_parent(ecs_world_t *world, ecs_entity_t child,
                     ecs_entity_t parent);
 
 /* World-space position of an entity, i.e. the translation column of its
- * world matrix. Zero vector if it has no world transform yet. */
+ * world matrix. Zero vector if it has no world transform yet.
+ *
+ * This is the SIMULATED position. Use it for gameplay -- collision, aiming,
+ * distance checks -- because it is the same on every machine regardless of
+ * framerate. */
 Vector3 mye_world_position(const ecs_world_t *world, ecs_entity_t entity);
+
+/* Where the entity is DRAWN this frame: the same chain with every
+ * interpolated link blended (see render/render2d.h). Equal to
+ * mye_world_position when nothing in the chain interpolates.
+ *
+ * Use it for anything that has to line up with the picture -- a camera
+ * following a player, a marker drawn over an enemy. Never for gameplay: it
+ * moves with the framerate, which is exactly what the fixed timestep exists
+ * to keep out of the simulation.
+ *
+ * Falls back to the world position, then to the raw MyePosition2D/3D, so it
+ * answers sensibly for an entity that is not in the hierarchy at all. */
+Vector3 mye_render_position(const ecs_world_t *world, ecs_entity_t entity);
+
+/* Orientation of an entity as drawn, from the same matrix. Identity if it
+ * has none. */
+Quaternion mye_render_rotation(const ecs_world_t *world, ecs_entity_t entity);
+
+/* Gives an entity the 2D transform components, at the given position. The
+ * 3D counterpart is mye_spawn_3d. */
+ecs_entity_t mye_spawn_2d(ecs_world_t *world, Vector2 position);
 
 /* ------------------------------------------------------------------ maths -- */
 

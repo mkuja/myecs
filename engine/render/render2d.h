@@ -1,7 +1,7 @@
 /* 2D rendering. See plan/03-rendering.md.
  *
- * All drawing happens on the main thread inside the EcsOnStore phase, which
- * the engine keeps single-threaded. The pass order is fixed:
+ * All drawing happens on the main thread, in the engine's draw phases (see
+ * core/engine.h), which are single-threaded. The pass order is fixed:
  *
  *   MyeRenderBegin   BeginDrawing + clear
  *   MyeRenderSprites world-space sprites, sorted, inside BeginMode2D
@@ -89,10 +89,14 @@ typedef struct MyeHidden {
     char unused;
 } MyeHidden;
 
-/* The active 2D camera. The engine draws with the first entity that has one
- * marked active. */
+/* Marks an entity as a 2D camera. Its position comes from the entity's
+ * transform, so it can be parented or driven by MyeCameraFollow -- see
+ * render/camera.h. The first one marked active is the one that draws. */
 typedef struct MyeCamera2D {
-    Camera2D camera;
+    float zoom;      /* 1 = one world unit per pixel; 0 is treated as 1 */
+    float rotation;  /* degrees */
+    Vector2 offset;  /* where on screen the camera's position lands;
+                        mye_camera2d_spawn defaults it to the centre */
     bool active;
 } MyeCamera2D;
 

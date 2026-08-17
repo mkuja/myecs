@@ -15,6 +15,7 @@
 #include "core/engine.h"
 #include "input/input.h"
 #include "render/render2d.h"
+#include "render/camera.h"
 #include "render/render3d.h"
 #include "scene/transform.h"
 
@@ -39,6 +40,7 @@ enum {
 
 typedef struct ShowcaseState {
     ecs_entity_t camera;
+    ecs_entity_t pivot;
     ecs_entity_t fox;
     ecs_entity_t boombox;
 
@@ -70,16 +72,14 @@ static void CameraControl(ecs_iter_t *it)
     if (state->camera_height < 5.0f) state->camera_height = 5.0f;
     if (state->camera_height > 250.0f) state->camera_height = 250.0f;
 
-    MyeCamera3D *cam = ecs_ensure(world, state->camera, MyeCamera3D);
-    if (cam != NULL) {
-        cam->camera.position = (Vector3){
-            cosf(state->orbit_angle) * state->orbit_distance,
-            state->camera_height,
-            sinf(state->orbit_angle) * state->orbit_distance,
-        };
-        cam->camera.target = (Vector3){ 0.0f, 40.0f, 0.0f };
-        ecs_modified(world, state->camera, MyeCamera3D);
-    }
+    /* The camera is a child of a pivot at the scene's centre, so orbiting is
+     * just yawing the pivot -- the hierarchy carries the camera around. */
+    ecs_set(world, state->pivot, MyeRotation3D,
+            { QuaternionFromAxisAngle((Vector3){ 0.0f, 1.0f, 0.0f },
+                                      state->orbit_angle) });
+    ecs_set(world, state->camera, MyePosition3D,
+            { { 0.0f, state->camera_height, state->orbit_distance } });
+    mye_camera_look_at(world, state->camera, (Vector3){ 0.0f, 40.0f, 0.0f });
 
     /* Switching animation cycles on one rig -- the thing Fox exists to
      * demonstrate. */
@@ -204,9 +204,11 @@ int main(void)
                         .camera_height = 70.0f });
     ShowcaseState *state = ecs_singleton_ensure(world, ShowcaseState);
 
+    state->pivot = mye_spawn_3d(world, (Vector3){ 0.0f, 40.0f, 0.0f });
     state->camera = mye_camera3d_spawn(world,
-                                       (Vector3){ 120.0f, 70.0f, 120.0f },
+                                       (Vector3){ 0.0f, 70.0f, 190.0f },
                                        (Vector3){ 0.0f, 40.0f, 0.0f }, 50.0f);
+    mye_set_parent(world, state->camera, state->pivot);
 
     /* --- the assets ---------------------------------------------------- */
     char fox_path[1024];
@@ -275,7 +277,7 @@ int main(void)
               .enabled = true });
 
     ECS_SYSTEM(world, SpinBoomBox, MyeOnFixedUpdate, MyeRotation3D);
-    ECS_SYSTEM(world, CameraControl, EcsOnUpdate, ShowcaseState);
+    ECS_SYSTEM(world, CameraControl, MyeOnCamera, ShowcaseState);
     ECS_SYSTEM(world, DrawHud, MyeOnDrawUI, [in] ShowcaseState);
 
     MyeRenderConfig *render_config = ecs_singleton_ensure(world,

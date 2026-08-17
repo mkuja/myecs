@@ -47,6 +47,7 @@ extern ecs_entity_t MyeOnFixedUpdate;
 /* The frame's draw order, as an explicit chain of phases:
  *
  *   EcsOnStore      BeginDrawing + clear        (engine)
+ *   MyeOnCamera     follow / orbit systems      (engine + game)
  *   MyeOnDraw3D     world-space 3D pass         (render3d)
  *   MyeOnDraw2D     world-space sprite pass     (render2d)
  *   MyeOnDrawUI     screen-space HUD and menus  (game)
@@ -54,7 +55,14 @@ extern ecs_entity_t MyeOnFixedUpdate;
  *
  * Phases rather than registration order, so a module or game can register a
  * draw system at any time and still land in the right place. 3D draws first
- * so 2D sprites and the HUD compose over it. */
+ * so 2D sprites and the HUD compose over it.
+ *
+ * MyeOnCamera runs after transforms are propagated (EcsPostUpdate) and
+ * blended for display (EcsPreStore), so a system there that moves a camera
+ * from a target's drawn position sees this frame's final value. Camera
+ * logic belongs here, not in EcsOnUpdate where the target has not moved yet
+ * -- see render/camera.h. */
+extern ecs_entity_t MyeOnCamera;
 extern ecs_entity_t MyeOnDraw3D;
 extern ecs_entity_t MyeOnDraw2D;
 extern ecs_entity_t MyeOnDrawUI;
@@ -73,6 +81,12 @@ struct mye_engine {
 
     bool headless;
     bool window_open;
+
+    /* The size the window was asked for. Kept even when headless, so
+     * projection maths (camera screen/world helpers) works without a
+     * window -- which is what makes picking testable. */
+    int width;
+    int height;
     uint64_t max_frames; /* 0 = unlimited */
     const char *screenshot_path;
 
