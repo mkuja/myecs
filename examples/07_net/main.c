@@ -97,6 +97,17 @@ static void NetPump(ecs_iter_t *it)
      * which looks like the network died when in fact nothing was ever sent
      * a second time. The frame counter is engine state and always advances. */
     const MyeTime *time = ecs_singleton_get(it->world, MyeTime);
+
+    /* Logged rather than only drawn: a web build is verified through the
+     * page console, because a one-shot headless screenshot freezes the
+     * timer queue at the load event and captures a page that has run three
+     * frames. Pixels are not liveness. */
+    if (time != NULL && time->frame % 60 == 0) {
+        mye_log_info("client: frame %llu  sent %d  received %d  last '%s'",
+                     (unsigned long long)time->frame, net->sent,
+                     net->received, net->last);
+    }
+
     if (time != NULL && time->frame % 30 == 0) {
         char line[64];
         int n = snprintf(line, sizeof line, "ping %d", net->sent);
