@@ -104,16 +104,19 @@ Non-blocking by design: producers handle "full" (retry/drop/grow policy per
 call site), the main thread drains with `while (recv())` in a system — never
 blocks the frame.
 
-**Primary use — async asset loading (M4):**
+**The shape it was designed for** (this pipeline was built, then removed --
+assets load at scene boundaries now; see [06-assets.md](06-assets.md). It is
+kept here because it is the pattern the channel exists for, and the WebSocket
+transport in [12-networking.md](12-networking.md) uses the same one):
 
 ```text
 main thread                          worker pool
 ───────────                          ───────────
-mye_asset_load_async(path) ──req──▶  read file, decode image/mesh (CPU only)
-                                     │
-AssetUploadSystem (EcsPreStore) ◀─done┘  {handle, pixels}
-  drains channel, LoadTextureFromImage  (GPU upload, main thread only)
-  marks handle LOADED
+submit(work) ─────────────req──────▶  do the CPU-only part off the frame
+                                      │
+a system, once per frame  ◀────done───┘  {handle, result}
+  drains the channel and finishes the
+  part that must be on the main thread
 ```
 
 "Entities communicating between threads" from the original wish list maps to

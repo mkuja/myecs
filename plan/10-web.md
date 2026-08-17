@@ -50,10 +50,10 @@ inversion can follow once its cost is measured. See
 Emscripten pthreads need `-pthread`, `SharedArrayBuffer`, and the server must
 send COOP/COEP headers. That is a deployment constraint, not just a build flag.
 
-We are already well placed: `mye_config.asset_workers = -1` disables the pool
-and makes every load synchronous, and `mye_texture_load_async` falls back
-transparently. **First web build should ship single-threaded**, with threads
-as a later opt-in once the hosting story is settled.
+We are already well placed: asset loading is synchronous on every target, and
+nothing in the engine starts a thread unless a game asks for one.
+**First web build should ship single-threaded**, with threads as a later
+opt-in once the hosting story is settled.
 
 flecs' worker pipeline (M7) is subject to the same constraint — the web build
 should keep `ecs_set_threads` at 1.
@@ -66,9 +66,10 @@ file) or fetched asynchronously over the network. Since Asteroids generates
 all its art and audio in code, the first web build needs no asset packaging at
 all — a genuine accident of good fortune.
 
-Longer term the async loader's *shape* is right for the web: the "decode
-elsewhere, upload on the main thread" split maps onto `fetch` + main-thread
-GPU upload, just with a different backend behind `mye_texture_load_async`.
+(The engine did once have an async loader whose shape would have suited the
+web -- "decode elsewhere, upload on the main thread" maps onto `fetch` plus a
+main-thread upload. It was removed in favour of loading at scene boundaries;
+see [06-assets.md](06-assets.md) for why, and for what it would take back.)
 
 ### 4. Smaller things
 

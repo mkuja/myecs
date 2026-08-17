@@ -547,14 +547,27 @@ acceptable, because that is what a loading screen is for, and the GPU upload
 has to happen on the main thread regardless -- a worker could only ever do
 the decode half.
 
-If a game later needs to bring in assets *during* play without a hitch, the
-answer is to spread the loads over several frames -- a few per frame from a
-list -- not to add a thread. The upload still has to land on the main thread,
-so a thread buys only the decode, and costs you a whole concurrency story.
+Be clear about what that costs: a scene's `load` blocks the frame, so the
+loading screen is a still image, not an animated one. Decoding a large PNG is
+tens of milliseconds, and that is genuinely the bulk of a load -- the GPU
+upload is the cheap part.
+
+The engine used to decode on worker threads to hide exactly that, and the
+capability was dropped on purpose. A worker can only do the decode, since the
+upload is main-thread-only; the first web target is single-threaded because
+threads there need cross-origin isolation; and a pipeline that exists for one
+consumer is a concurrency story to maintain forever. Loading at a boundary you
+control is the simpler trade.
+
+If a game later needs assets *during* play, spreading loads over several
+frames -- a few per frame from a list -- covers the common case. It is not a
+universal answer: one asset whose decode exceeds a frame budget still hitches,
+because there is no way to split a single load.
 
 ```c ctx
-/* In a scene load: pull in everything the scene needs, once. */
-mye_assets_set_scope(world, 1);          /* tag them, so unload releases them */
+/* Inside a scene's load function: pull in everything it needs, once. The
+ * scene system has already set the asset scope, so unloading the scene
+ * releases these -- there is nothing to tag by hand. */
 mye_texture ship = mye_texture_load(world, "assets/ship.png");
 mye_texture rock = mye_texture_load(world, "assets/rock.png");
 (void)ship;

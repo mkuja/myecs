@@ -151,10 +151,12 @@ Notes for later:
 - Loading-screen support: a scene load is the pause, so the screen is drawn around it.
 
 **DoD**: ✅ `tests/integration/test_int_assets.c` — 5 headless registry tests
-covering LOADING→READY transitions, concurrent loads, dedupe of in-flight
-requests, missing files, release-while-loading, shutdown mid-flight, and the
-synchronous fallback. Channel and job-pool unit tests (13 more). All three
-suites TSan-clean.
+covering dedupe with refcounting, generation-checked stale handles, missing
+files, and named generated textures. Channel and job-pool unit tests (13
+more). All three suites TSan-clean.
+
+The original DoD here was the async pipeline, which was later removed
+(see plan/06-assets.md): assets load at scene boundaries instead.
 
 Notes for later:
 

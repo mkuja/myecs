@@ -3,8 +3,7 @@
 ## Goals
 
 - Gameplay code refers to assets by **handle**, never raw pointers.
-- Assets load synchronously, at scene boundaries, without
-  changing call sites.
+- Assets load synchronously, at scene boundaries.
 - Scene unload releases exactly the assets that scene brought in
   (ref-counting), with leak reporting in debug.
 
@@ -57,13 +56,19 @@ path that loaded it.
 
 - **M2 (sync)**: `mye_texture_load` does raylib `LoadTexture` inline on the
   main thread. State goes straight to `LOADED`. Fine for small demos.
-- **Dropped (was M4): an async path.** A worker can only do the decode; the
-  GPU upload is main-thread-only, so the split buys half a load and costs a
-  concurrency story. Loading happens at scene boundaries, where a pause is
-  what a loading screen is for. Streaming during play, if it is ever needed,
-  is loads spread across frames -- no thread.
-- `mye_texture_valid()` reports whether a handle resolved; a scene knows what it loaded
-  for a scene's asset set.
+- **Dropped (was M4): an async path.** It did work -- decoding is most of a
+  load's wall time, and moving it off the main thread genuinely shortened
+  loading screens. It was removed anyway: a worker can only ever do the
+  decode, since the GPU upload is main-thread-only; the first web target is
+  single-threaded because threads there need cross-origin isolation; and a
+  pipeline maintained for one consumer is a permanent concurrency cost.
+  Loading now happens at scene boundaries, where a pause is what a loading
+  screen is for -- accepting that the screen is a still image rather than an
+  animated one. Streaming during play, if it is ever needed, is loads spread
+  across frames, which works as long as a single asset's decode fits a frame
+  budget.
+- `mye_texture_valid()` reports whether a handle resolved; a scene knows what
+  it loaded, because the scene system scopes every load it triggers.
 
 ## Paths & formats
 
@@ -79,7 +84,7 @@ path that loaded it.
 - **Unit** (headless): handle generation/staleness, dedupe by path, refcount
   release order, placeholder on stale get, pool slot reuse — the registry is
   testable with a fake payload type, no raylib init needed.
-- **Integration**: `tests/integration/test_int_assets.c` covers the registry headlessly -- dedupe, refcounts, stale handles, missing files.
-  (fake decoder job + channel + drain loop → state transitions
-  EMPTY→LOADING→LOADED) and a `render`-labeled smoke test loading a real PNG
-  into a hidden-window world. See [09-testing.md](09-testing.md).
+- **Integration**: `tests/integration/test_int_assets.c` covers the registry
+  headlessly — dedupe, refcounts, stale handles, missing files — and
+  `test_int_scene.c` covers scope-based release across scene switches. See
+  [09-testing.md](09-testing.md).

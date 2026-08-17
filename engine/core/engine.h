@@ -96,7 +96,6 @@ typedef struct mye_config {
     /* Per-frame scratch capacity in bytes. Default 1 MiB. */
     size_t frame_arena_bytes;
 
-
     /* flecs pipeline worker threads for SIMULATION systems. 0 or 1 keeps
      * everything on the main thread (the default, and the right starting
      * point). Only systems explicitly marked `.multi_threaded = true` are

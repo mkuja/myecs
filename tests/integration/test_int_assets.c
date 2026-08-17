@@ -10,16 +10,25 @@
 #include <raylib.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 
-#define TEST_DIR "/tmp/mye_assets_test"
+/* Honours TMPDIR: a hardcoded /tmp path fails confusingly on a shared
+ * machine where another user already owns that directory. */
+static const char *test_dir(void)
+{
+    static char dir[512];
+    if (dir[0] == '\0') {
+        const char *base = getenv("TMPDIR");
+        snprintf(dir, sizeof dir, "%s/mye_assets_test",
+                 base != NULL && base[0] != '\0' ? base : "/tmp");
+    }
+    return dir;
+}
 
 /* A real PNG on disk, so the test exercises actual file I/O rather than a
  * stub that could hide a decode failure. */
 static bool write_test_png(const char *path, int width, int height, Color fill)
 {
-    if (!DirectoryExists(TEST_DIR)) {
-        MakeDirectory(TEST_DIR);
-    }
     Image image = GenImageColor(width, height, fill);
     bool ok = ExportImage(image, path);
     UnloadImage(image);
@@ -28,10 +37,11 @@ static bool write_test_png(const char *path, int width, int height, Color fill)
 
 static void make_path(const char *name, char *out, size_t out_size)
 {
-    if (!DirectoryExists(TEST_DIR)) {
-        MakeDirectory(TEST_DIR);
+    const char *dir = test_dir();
+    if (!DirectoryExists(dir)) {
+        MakeDirectory(dir);
     }
-    snprintf(out, out_size, "%s/%s", TEST_DIR, name);
+    snprintf(out, out_size, "%s/%s", dir, name);
 }
 
 static ecs_world_t *make_world(void)
@@ -76,9 +86,15 @@ TEST(loading_the_same_path_twice_shares_one_slot)
     mye_texture b = mye_texture_load(world, path);
     mye_texture c = mye_texture_load(world, path);
 
+    /* Generations too, not just indices: `a` is slot 0 in a fresh world, so
+     * a failed second load returning the zero handle would match on index
+     * alone and this test would pass with dedupe broken. */
     ASSERT_TRUE(mye_texture_valid(world, a));
+    ASSERT_TRUE(mye_texture_valid(world, b));
+    ASSERT_TRUE(mye_texture_valid(world, c));
     ASSERT_EQ_INT((int)a.index, (int)b.index);
     ASSERT_EQ_INT((int)a.index, (int)c.index);
+    ASSERT_EQ_INT((int)a.generation, (int)b.generation);
     ASSERT_EQ_INT((int)a.generation, (int)c.generation);
 
     mye_asset_stats stats = mye_asset_stats_get(world);
@@ -135,6 +151,12 @@ TEST(a_stale_handle_does_not_resolve_to_the_next_tenant)
 
     mye_texture fresh = mye_texture_load(world, second);
     ASSERT_TRUE(mye_texture_valid(world, fresh));
+    /* The point of the test: `fresh` must be the same slot, so the two
+     * handles differ only by generation. Without this the test would still
+     * pass if slots stopped being reused, while claiming to cover a
+     * collision it no longer creates. */
+    ASSERT_EQ_INT((int)old.index, (int)fresh.index);
+    ASSERT_TRUE(old.generation != fresh.generation);
     ASSERT_TRUE(!mye_texture_valid(world, old));
     ASSERT_TRUE(mye_texture_get(world, old) == NULL);
 
@@ -153,7 +175,9 @@ TEST(a_generated_texture_needs_no_file)
     /* Named, so asking again shares the slot rather than uploading twice. */
     Image other = GenImageColor(12, 12, PURPLE);
     mye_texture again = mye_texture_from_image(world, "gen:test", other);
+    ASSERT_TRUE(mye_texture_valid(world, again));
     ASSERT_EQ_INT((int)tex.index, (int)again.index);
+    ASSERT_EQ_INT((int)tex.generation, (int)again.generation);
 
     ASSERT_EQ_INT(0, mye_shutdown(world));
 }

@@ -11,12 +11,10 @@ ECS_COMPONENT_DECLARE(MyeAssets);
 #define MYE_MAX_SOUNDS 128
 #define MYE_MAX_MODELS 128
 #define MYE_ASSET_KEY_MAX 128
-/* Deep enough that every texture slot can be in flight at once. */
 
 typedef enum asset_state {
     ASSET_EMPTY = 0,
     ASSET_LOADED,
-    ASSET_FAILED,
 } asset_state;
 
 typedef struct texture_slot {
@@ -90,9 +88,8 @@ static void copy_key(char *dst, const char *src)
     dst[n] = '\0';
 }
 
-/* Matches slots that are loaded *or* still decoding. Including LOADING is
- * what makes dedupe work: a second request for a path already in
- * flight must share that slot, not start a second decode and upload. */
+/* Dedupe: a second request for a path already loaded shares that slot and
+ * takes a reference, rather than loading and uploading it twice. */
 static int find_texture_by_key(const mye_asset_db *db, const char *key)
 {
     for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
@@ -257,8 +254,9 @@ void mye_texture_release(ecs_world_t *world, mye_texture handle)
         return;
     }
 
-    /* Deliberately not resolve_texture(): a handle whose decode is still in
-     * flight must be releasable too. */
+    /* Open-coded rather than resolve_texture() only because the caller may
+     * legitimately hold a stale handle here; releasing one twice must be a
+     * no-op, not an error. */
     texture_slot *slot = &db->textures[handle.index];
     if (slot->generation != handle.generation ||
         slot->state != ASSET_LOADED) {
@@ -687,7 +685,6 @@ void mye_sound_release(ecs_world_t *world, mye_sound handle)
     ++slot->generation;
 }
 
-
 /* ---------------------------------------------------------------- scopes -- */
 
 void mye_assets_set_scope(ecs_world_t *world, uint32_t scope)
@@ -714,7 +711,7 @@ void mye_assets_release_scope(ecs_world_t *world, uint32_t scope)
     /* Release rather than unload outright: an asset another scope also asked
      * for has a refcount above one and must survive. */
     for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
-        if (db->textures[i].state != ASSET_EMPTY &&
+        if (db->textures[i].state == ASSET_LOADED &&
             db->textures[i].scope == scope) {
             mye_texture_release(world,
                                 (mye_texture){ .index = (uint32_t)i,
@@ -743,7 +740,6 @@ void mye_assets_release_scope(ecs_world_t *world, uint32_t scope)
 }
 
 /* ----------------------------------------------------------------- stats -- */
-
 
 mye_asset_stats mye_asset_stats_get(const ecs_world_t *world)
 {
@@ -777,7 +773,6 @@ static void assets_fini(ecs_world_t *world, void *ctx)
     if (db == NULL) {
         return;
     }
-
 
     for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
         if (db->textures[i].state == ASSET_LOADED &&
@@ -857,9 +852,6 @@ void MyeAssetsModuleImport(ecs_world_t *world)
     }
 
     ecs_singleton_set(world, MyeAssets, { .db = db });
-
-    /* Uploads land before anything draws this frame. Registered even when
-     * headless: the state transition to READY must still happen. */
 
     ecs_atfini(world, assets_fini, db);
 }

@@ -148,10 +148,9 @@ a third:
 ```
 
 where `mye_thread_create` returns `false`. Nothing else changes, because the
-graceful path is already built and tested: `mye_jobs_create` returns NULL, the
-asset registry falls back to synchronous loading, and
-`mye_texture_load_async` transparently loads inline. That behaviour has a test
-already (`disabling_workers_falls_back_to_synchronous`).
+graceful path is already built: `mye_jobs_create` returns NULL and a caller
+that wanted a pool runs its work inline. Asset loading is synchronous on
+every target, so it has no thread to lose.
 
 The dev server sends COOP/COEP headers anyway, so enabling threads later is a
 build-flag change rather than a re-architecture.
