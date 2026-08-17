@@ -137,7 +137,7 @@ end of frustum culling, which is out of scope by decision.
 
 ## Milestones
 
-**C1 — multi-camera.** `viewport`, `order`, both passes looping, config field
+**C1 — multi-camera. BUILT** (`5829245`, `26673a2`). `viewport`, `order`, both passes looping, config field
 deleted, scissor restored. *Done when:* a test asserts two cameras with
 different viewports both draw, ordered; and the examples still look identical
 because one camera is the degenerate case.
@@ -149,8 +149,8 @@ drawn by a camera whose mask includes 2 and skipped by one whose does not.
 **C3 — near/far**, and the ergonomics: `mye_camera_at_screen`, the
 explicit-camera helper forms.
 
-**Deferred, with reasons:** render-to-texture targets (portals; nothing needs
-them yet), dead zones and bounds on follow (real, but orthogonal), frustum
+**Deferred, with reasons:** render-to-texture targets -- now planned in full
+as [14-canvases.md](14-canvases.md) (C4), dead zones and bounds on follow (real, but orthogonal), frustum
 culling (out of scope by decision), a viewport/node abstraction (Godot's
 answer to a question Bevy's design does not ask).
 
