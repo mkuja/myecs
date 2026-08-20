@@ -224,7 +224,7 @@ rest to flecs' pipeline:
 | | What runs | Where |
 |---|---|---|
 | 1 | pending scene switch applied | `mye_progress`, not a system |
-| 2 | input polled | `mye_progress`, not a system |
+| 2 | input polled, registered net connections pumped (§23) | `mye_progress`, not a system |
 | 3 | **`MyeOnFixedUpdate`** — **your simulation**, run 0..n times (§4) | its own pipeline |
 | 4 | everything below, once | `ecs_progress` |
 
@@ -234,10 +234,12 @@ Then, inside `ecs_progress`:
 |---|---|
 | `EcsOnLoad` | `MyeTime` update |
 | `EcsPreUpdate` | timers |
-| `EcsOnUpdate` | per-frame gameplay: menus, scene switching, camera |
+| `EcsOnUpdate` | per-frame gameplay: menus, scene switching |
 | `EcsPostUpdate` | transform propagation (§9) |
 | `EcsPreStore` | sprite animation, interpolation blend, sorting |
 | `EcsOnStore` | `BeginDrawing` + clear |
+| `MyeOnCamera` | camera logic: follow, shake, your own (§8) |
+| `MyeOnDrawCanvases` | canvases render, before anything displays them (§8) |
 | `MyeOnDraw3D` | the 3D pass |
 | `MyeOnDraw2D` | the world-space sprite pass |
 | **`MyeOnDrawUI`** | **your HUD and menus**, screen space |
@@ -338,7 +340,8 @@ of death". With the clamp, a slow machine runs in slow motion instead, which is
 survivable.
 
 Rule of thumb: **movement, collision and physics go in `MyeOnFixedUpdate`.
-Menus, cameras and anything reading raw input go in `EcsOnUpdate`.**
+Menus and anything reading raw input go in `EcsOnUpdate`. Camera logic goes
+in `MyeOnCamera` (§8), after transforms are final.**
 
 ---
 
@@ -491,9 +494,11 @@ if (mye_tracking_has_leaks(&track)) mye_tracking_report(&track, "assets");
 
 ## 7. Assets and handles
 
-**What it is.** Textures, models and sounds are referred to by small handles
-(`mye_texture`, `mye_model`, `mye_sound`), not by pointers. The engine owns the
-GPU objects; you own an ID.
+**What it is.** Textures, models, sounds, music and fonts are referred to by
+small handles (`mye_texture`, `mye_model`, `mye_sound`, `mye_music`,
+`mye_font`), not by pointers. The engine owns the GPU objects; you own an ID.
+All five behave the same way; music and fonts have their own sections (§13's
+*Music*, §8's *Text*) because playing and drawing add rules of their own.
 
 **Why it is.** A `Texture2D` copied into a hundred sprite components is a
 hundred chances to keep using it after an unload. A handle can be *checked* —
@@ -840,6 +845,12 @@ Vector2 on_screen = mye_world_to_screen_2d(world, in_world);
 The 3D equivalents are `mye_screen_ray` (what to intersect for picking) and
 `mye_world_to_screen`. A zero `zoom` would show nothing, so the engine treats
 it as 1 rather than silently drawing a blank screen.
+
+With several viewports -- a split screen, a minimap -- these helpers resolve
+against the camera whose viewport the point is IN, so a click in player two's
+half is read in player two's world. `mye_camera_at_screen` tells you which
+camera that is, and `mye_world_to_screen_for` / `mye_screen_ray_for` ask a
+specific camera instead of the point deciding.
 
 ### Canvases: rendering somewhere other than the window
 
@@ -1224,8 +1235,6 @@ the engine papers over.
 
 ---
 
----
-
 ## 13. Audio
 
 **What it is.** `mye_sound_play(world, handle)` from anywhere. Requests are
@@ -1462,6 +1471,12 @@ An orbit camera is a camera parented to an invisible pivot: rotate the pivot
 and the camera swings around it, with no trigonometry anywhere.
 `examples/03_scene3d` does exactly that.
 
+Two smaller controls, both defaulting to "as before": `MyeCamera3D` carries
+`near_plane` / `far_plane` (0 keeps raylib's 0.01/1000 -- set them when a
+large scene clips or z-fights), and `MyeVisibilityLayers` filters meshes
+exactly as it filters sprites (§8) -- a minimap camera whose `layers` mask
+selects only blip entities shows blips, not the world.
+
 ### Two shaders
 
 `MyeRender3dConfig.use_pbr` picks between them:
@@ -1689,7 +1704,7 @@ Everything here is built and tested under ThreadSanitizer as a separate
 configuration:
 
 ```sh
-cmake -S . -B build/tsan -DCMAKE_BUILD_TYPE=Debug -DMYE_SANITIZER=thread
+cmake -S . -B build/tsan -DCMAKE_BUILD_TYPE=Debug -DMYE_SANITIZE_THREAD=ON
 cmake --build build/tsan -j && ctest --test-dir build/tsan -LE render
 ```
 
@@ -1736,8 +1751,9 @@ static void install_logging(void)
 }
 ```
 
-The counters are atomic: raylib logs from its asset worker threads, so they are
-written from more than one thread.
+The counters are atomic, so logging from a job or one of your own threads is
+safe -- and it should be, because a background thread that cannot even report
+a failure is a debugging dead end.
 
 ---
 
@@ -1753,6 +1769,14 @@ about state you cannot see. The overlay answers the first; the Explorer answers
 the second by showing you every entity, its component *values*, and every
 system and query — live, and editable while the game runs. For learning an ECS
 this is worth more than any amount of `printf`.
+
+The overlay's `systems` block is the sharper half of "it is slow": per-system
+milliseconds, worst first, measured only while the overlay is open (Debug
+builds only -- the stats machinery is compiled out of Release). One honest
+caveat baked into the numbers: on a vsynced game the top entry is usually
+`MyeRenderEnd`, because the wait for the display happens inside `EndDrawing`.
+That is the frame going on the monitor, not work. When a connection is
+registered (§23), a `net` line appears with queue depths and byte counts.
 
 ```c fn
 ecs_world_t *world = mye_init(&(mye_config){
@@ -1844,7 +1868,13 @@ python3 tools/web_dev.py --example 06_tutorial --port 8080
 ```
 
 Edit any `.c` or `.h` and save: rebuild takes about 2 seconds and the page
-reloads itself.
+reloads itself — **and the game carries on where it was.** Before the reload
+the page snapshots the world to JSON (the same serializer as §16) into the
+browser's sessionStorage; the fresh build restores it on its first frame. A
+tweak to a constant lands mid-playthrough instead of at another restart. Two
+honest limits: a component without reflection data (§16) comes back
+uninitialized rather than absent, and anonymous children do not survive --
+name what you parent if it must live through a reload.
 
 Nothing about this is tied to `examples/`. `--example` is shorthand for the
 `example_<name>` targets; your own game takes `--target` instead, and needs
@@ -2148,9 +2178,6 @@ transport; no state synchronisation, interest management or matchmaking. See
 
 ---
 
-
----
-
 ## 24. Capstone: Orbit Collector
 
 Nearly every feature above, in one game. It predates the collision module and
@@ -2181,7 +2208,7 @@ What it uses, and where to look in the listing:
 | Prefabs (§10) | `OrbPrefab`, `MinePrefab` |
 | Scenes (§11) | `menu` and `play`, with reload as "restart" |
 | Audio (§13) | pickup and hit beeps, synthesised |
-| Input actions (§14's sibling) | `ACT_X`, `ACT_Y`, `ACT_CONFIRM`, keys and arrows both |
+| Input actions (§12) | `ACT_X`, `ACT_Y`, `ACT_CONFIRM`, keys and arrows both |
 | Logging (§18) | scene transitions and game over |
 | Overlay (§19) | F3 |
 
@@ -2700,3 +2727,6 @@ that quietly breaks.
 - `examples/05_showcase` loads real glTF models with PBR and skeletal animation.
 - `examples/04_stress` is where the 10.9× parallel figure comes from; run it
   with `worker_threads` set to different values and watch the crossover.
+- `examples/07_net` is a relay and its clients in one binary — the smallest
+  complete networked game, and `presence.h` is the wire format written to be
+  copied.
