@@ -80,10 +80,18 @@ typedef struct MyeCamera3D {
 `zoom` and `offset`.
 
 ```c
-/* Optional, on any drawable entity. Absent means layer 0 only, which is
- * what every existing entity and every existing camera sees. */
+/* Optional, on any drawable entity. Absent means EVERY layer, so an entity
+ * that says nothing about layers is drawn by every camera. */
 typedef struct MyeVisibilityLayers { uint32_t mask; } MyeVisibilityLayers;
 ```
+
+Both defaults are permissive, and deliberately: a camera that names no layers
+sees everything, an entity that names none is on everything, so neither can be
+made invisible by a field it never set. The alternative default — absent means
+layer 0 — would make a camera with `layers = 2` render an empty screen in an
+existing game, which reads as a broken renderer. The cost is that "the minimap
+shows blips, not the world" needs the world labelled too; layers are a
+labelling scheme, and the engine labels nothing on the game's behalf.
 
 `MyeRenderConfig.camera` and `MyeRender3dConfig.camera` are **deleted**.
 
@@ -111,12 +119,15 @@ Two things this must get right, both of which are how it can go subtly wrong:
   camera's viewport — a minimap-sized HUD in the corner, which looks like a
   layout bug rather than a camera bug.
 
-`mye_camera3d_active()` / `mye_camera2d_active()` keep their meaning for the
-screen↔world helpers, redefined as "the lowest-`order` active camera whose
-viewport contains the point" (for screen→world) or simply the lowest-`order`
-active camera. Mouse picking in a split screen must resolve against the
-viewport the cursor is in, or clicks in player 2's half are interpreted in
-player 1's world.
+`mye_camera3d_active()` / `mye_camera2d_active()` keep their meaning — the
+lowest-`order` active camera on the window — and that is what world→screen
+uses, since there is no point to ask. Screen→world is the other way round: the
+POINT picks the camera, through `mye_camera_at_screen`, which answers with the
+TOPMOST camera over that pixel (the one the player thinks they clicked on).
+Mouse picking in a split screen must resolve against the viewport the cursor
+is in, or clicks in player 2's half are interpreted in player 1's world. A
+pixel inside no viewport falls back to the active camera, which is the only
+answer available and is what a single-camera game has always got.
 
 ### Helpers
 
@@ -130,6 +141,11 @@ ecs_entity_t mye_camera_at_screen(const ecs_world_t *, Vector2 screen);
  * cameras is not forced through "the active one". */
 Vector2 mye_world_to_screen_for(const ecs_world_t *, ecs_entity_t cam, Vector3);
 Ray     mye_screen_ray_for(const ecs_world_t *, ecs_entity_t cam, Vector2);
+
+/* The layer rule in one place, so a game drawing in a system of its own can
+ * obey the same one the passes do -- and so it is checkable without a
+ * window, which is where masks are easiest to get wrong. */
+bool mye_camera_sees(const ecs_world_t *, ecs_entity_t cam, ecs_entity_t);
 ```
 
 Godot's `is_position_in_frustum` is deliberately **not** added: it is the thin
@@ -142,12 +158,26 @@ deleted, scissor restored. *Done when:* a test asserts two cameras with
 different viewports both draw, ordered; and the examples still look identical
 because one camera is the degenerate case.
 
-**C2 — layers.** `MyeVisibilityLayers`, `layers` on both camera components,
-the intersection test in both passes. *Done when:* an entity on layer 2 is
-drawn by a camera whose mask includes 2 and skipped by one whose does not.
+**C2 — layers. BUILT.** `MyeVisibilityLayers` (owned by the 2D module, like
+`MyeHidden`, because both renderers draw), `layers` on both camera components,
+the intersection test in both passes, and `mye_camera_sees` stating the rule
+once. The sprite pass resolves each entity's mask into the draw list it
+already builds per frame; the mesh pass asks per entity, and only when the
+camera named layers at all, so a camera with `layers == 0` costs nothing.
+*Done:* two pixel tests, one per pass, draw a single object through two
+cameras that differ in nothing but their mask; only the sharing camera shows
+it, and the other's half of the window has not one pixel of it.
 
-**C3 — near/far**, and the ergonomics: `mye_camera_at_screen`, the
-explicit-camera helper forms.
+**C3 — near/far and the ergonomics. BUILT.** `near_plane`/`far_plane` on
+`MyeCamera3D`, used when `mye_camera_begin_3d` builds the projection (0 keeps
+raylib's global cull distances, and an inverted pair falls back to them rather
+than render nothing). `mye_camera_at_screen` came with C1; the explicit forms
+`mye_world_to_screen_for` / `mye_screen_ray_for` are new, and — the part that
+was a correctness trap rather than an ergonomic one — all four existing
+screen↔world helpers now account for the camera's viewport rect, offset and
+aspect both, and screen→world resolves the camera the pixel is actually in.
+Not carried into the helpers: the clipping planes, because neither a screen
+position nor a ray direction depends on where they sit.
 
 **Deferred, with reasons:** render-to-texture targets -- now planned in full
 as [14-canvases.md](14-canvases.md) (C4), dead zones and bounds on follow (real, but orthogonal), frustum
@@ -176,6 +206,13 @@ Specific cases worth naming because they are the ways this breaks:
 - `mye_screen_ray_for` against a viewport-restricted camera accounts for the
   offset — a ray cast from a minimap pixel must not be interpreted as a
   main-view pixel
+
+All six exist. The pure ones are in `tests/integration/test_int_camera.c`; the
+ones that need a real framebuffer live in `test_int_render_cameras.c`
+(labelled `render`, alongside the C1 and C4 pixel tests rather than in
+`test_int_render_smoke.c` as first sketched): that each pass really applies
+the mask, that the clipping planes really clip, and that the viewport and
+scissor are back before the HUD draws.
 
 ## Sources
 

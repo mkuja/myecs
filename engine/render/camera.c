@@ -348,19 +348,23 @@ MyeSurface mye_camera_surface(const ecs_world_t *world, ecs_entity_t target)
     return (MyeSurface){ width, height };
 }
 
-ecs_entity_t mye_camera_at_screen(const ecs_world_t *world, Vector2 screen)
+/* The topmost camera of ONE dimensionality whose viewport holds a point.
+ *
+ * The dimensionality matters to the picking helpers and not to a caller
+ * asking "what did I click on": mye_screen_ray must not be handed the 2D HUD
+ * camera that happens to cover the whole window, or it would resolve it as a
+ * 3D camera, fail, and quietly return a zero ray. */
+static ecs_entity_t camera_at_screen_in(const ecs_world_t *world,
+                                        Vector2 screen, bool is_3d)
 {
+    ecs_entity_t cameras[MYE_MAX_DRAWN_CAMERAS];
+    int count = is_3d
+                    ? mye_camera3d_collect(world, cameras,
+                                           MYE_MAX_DRAWN_CAMERAS)
+                    : mye_camera2d_collect(world, cameras,
+                                           MYE_MAX_DRAWN_CAMERAS);
     /* Highest order first: the topmost camera at that pixel is the one the
      * player thinks they clicked on. */
-    ecs_entity_t cameras[MYE_MAX_DRAWN_CAMERAS];
-    int count = mye_camera2d_collect(world, cameras, MYE_MAX_DRAWN_CAMERAS);
-    for (int i = count - 1; i >= 0; --i) {
-        if (CheckCollisionPointRec(screen,
-                                   mye_camera_viewport(world, cameras[i]))) {
-            return cameras[i];
-        }
-    }
-    count = mye_camera3d_collect(world, cameras, MYE_MAX_DRAWN_CAMERAS);
     for (int i = count - 1; i >= 0; --i) {
         if (CheckCollisionPointRec(screen,
                                    mye_camera_viewport(world, cameras[i]))) {
@@ -368,6 +372,43 @@ ecs_entity_t mye_camera_at_screen(const ecs_world_t *world, Vector2 screen)
         }
     }
     return 0;
+}
+
+ecs_entity_t mye_camera_at_screen(const ecs_world_t *world, Vector2 screen)
+{
+    ecs_entity_t e = camera_at_screen_in(world, screen, false);
+    return e != 0 ? e : camera_at_screen_in(world, screen, true);
+}
+
+/* The layer rule, in one place. Both halves are permissive by design: a
+ * camera that named no layers sees everything, and an entity that named none
+ * is on every layer. That way neither a camera nor an entity can be made
+ * invisible by a field it never set. */
+static bool layers_see(uint32_t camera_layers, uint32_t entity_mask)
+{
+    return camera_layers == 0 || (camera_layers & entity_mask) != 0;
+}
+
+bool mye_camera_sees(const ecs_world_t *world, ecs_entity_t camera,
+                     ecs_entity_t entity)
+{
+    /* Both may be things a game is still holding after a delete, and flecs
+     * aborts on ecs_get for a dead entity in debug. */
+    if (camera == 0 || entity == 0 || !ecs_is_alive(world, camera) ||
+        !ecs_is_alive(world, entity)) {
+        return false;
+    }
+
+    const MyeCamera3D *c3 = ecs_get(world, camera, MyeCamera3D);
+    const MyeCamera2D *c2 = c3 == NULL ? ecs_get(world, camera, MyeCamera2D)
+                                       : NULL;
+    if (c3 == NULL && c2 == NULL) {
+        return false; /* not a camera: it draws nothing at all */
+    }
+    uint32_t camera_layers = c3 != NULL ? c3->layers : c2->layers;
+
+    const MyeVisibilityLayers *v = ecs_get(world, entity, MyeVisibilityLayers);
+    return layers_see(camera_layers, v != NULL ? v->mask : MYE_LAYERS_ALL);
 }
 
 bool mye_camera3d_active(const ecs_world_t *world, Camera3D *out,
@@ -516,44 +557,97 @@ static void screen_size(const ecs_world_t *world, int *width, int *height)
     *height = engine != NULL && engine->height > 0 ? engine->height : 720;
 }
 
-Vector2 mye_world_to_screen(const ecs_world_t *world, Vector3 point)
+/* THE VIEWPORT IS PART OF THE PROJECTION.
+ *
+ * mye_camera_begin_* narrows the GL viewport to the camera's rect and builds
+ * the projection with THAT rect's aspect, so what these helpers must undo is
+ * the same two things: the pixel offset of the rect's origin, and its size in
+ * place of the window's. Project against the full window instead -- which is
+ * what raylib's own helpers do, having no notion of a sub-viewport -- and a
+ * click in player two's half is answered in player one's world. Nothing looks
+ * wrong until two players are on screen.
+ *
+ * A full-window camera makes both corrections the identity, so the
+ * single-camera path is unchanged. */
+Vector2 mye_world_to_screen_for(const ecs_world_t *world, ecs_entity_t cam,
+                                Vector3 point)
 {
     Camera3D camera;
-    if (!mye_camera3d_active(world, &camera, NULL)) {
+    if (!mye_camera3d_resolve(world, cam, &camera)) {
         return (Vector2){ 0.0f, 0.0f };
     }
-    int width, height;
-    screen_size(world, &width, &height);
-    return GetWorldToScreenEx(point, camera, width, height);
+    Rectangle vp = mye_camera_viewport(world, cam);
+    Vector2 in_viewport = GetWorldToScreenEx(point, camera, (int)vp.width,
+                                             (int)vp.height);
+    return (Vector2){ in_viewport.x + vp.x, in_viewport.y + vp.y };
+}
+
+Ray mye_screen_ray_for(const ecs_world_t *world, ecs_entity_t cam,
+                       Vector2 screen)
+{
+    Camera3D camera;
+    if (!mye_camera3d_resolve(world, cam, &camera)) {
+        return (Ray){ 0 };
+    }
+    Rectangle vp = mye_camera_viewport(world, cam);
+    Vector2 in_viewport = { screen.x - vp.x, screen.y - vp.y };
+    return GetScreenToWorldRayEx(in_viewport, camera, (int)vp.width,
+                                 (int)vp.height);
+}
+
+Vector2 mye_world_to_screen(const ecs_world_t *world, Vector3 point)
+{
+    ecs_entity_t cam = 0;
+    Camera3D camera;
+    if (!mye_camera3d_active(world, &camera, &cam)) {
+        return (Vector2){ 0.0f, 0.0f };
+    }
+    return mye_world_to_screen_for(world, cam, point);
 }
 
 Ray mye_screen_ray(const ecs_world_t *world, Vector2 screen)
 {
-    Camera3D camera;
-    if (!mye_camera3d_active(world, &camera, NULL)) {
-        return (Ray){ 0 };
+    /* The point picks the camera. Outside every viewport there is no right
+     * answer, so the active camera gives the one a single-camera game has
+     * always got. */
+    ecs_entity_t cam = camera_at_screen_in(world, screen, true);
+    if (cam == 0) {
+        Camera3D camera;
+        if (!mye_camera3d_active(world, &camera, &cam)) {
+            return (Ray){ 0 };
+        }
     }
-    int width, height;
-    screen_size(world, &width, &height);
-    return GetScreenToWorldRayEx(screen, camera, width, height);
+    return mye_screen_ray_for(world, cam, screen);
 }
 
 Vector2 mye_world_to_screen_2d(const ecs_world_t *world, Vector2 point)
 {
+    ecs_entity_t cam = 0;
     Camera2D camera;
-    if (!mye_camera2d_active(world, &camera, NULL)) {
+    if (!mye_camera2d_active(world, &camera, &cam)) {
         return point; /* no camera: world space is screen space */
     }
-    return GetWorldToScreen2D(point, camera);
+    /* GetWorldToScreen2D works in the camera's own pixels -- its offset is
+     * relative to the viewport, which is exactly how mye_camera_begin_2d
+     * projects it -- so the rect's origin is all that is left to add. */
+    Rectangle vp = mye_camera_viewport(world, cam);
+    Vector2 in_viewport = GetWorldToScreen2D(point, camera);
+    return (Vector2){ in_viewport.x + vp.x, in_viewport.y + vp.y };
 }
 
 Vector2 mye_screen_to_world_2d(const ecs_world_t *world, Vector2 screen)
 {
+    ecs_entity_t cam = camera_at_screen_in(world, screen, false);
     Camera2D camera;
-    if (!mye_camera2d_active(world, &camera, NULL)) {
+    if (cam == 0 && !mye_camera2d_active(world, &camera, &cam)) {
         return screen;
     }
-    return GetScreenToWorld2D(screen, camera);
+    if (!mye_camera2d_resolve(world, cam, &camera)) {
+        return screen;
+    }
+    Rectangle vp = mye_camera_viewport(world, cam);
+    return GetScreenToWorld2D((Vector2){ screen.x - vp.x, screen.y - vp.y },
+                              camera);
 }
 
 /* ---------------------------------------------------- drawing through one -- */
@@ -598,7 +692,8 @@ static void restore_viewport(void)
 }
 
 void mye_camera_begin_3d(Rectangle viewport, MyeSurface surface,
-                         Camera3D camera, MyeCameraClear clear)
+                         Camera3D camera, MyeCameraClear clear,
+                         float cam_near, float cam_far)
 {
     rlDrawRenderBatchActive();
     set_viewport(viewport, surface.width, surface.height);
@@ -625,8 +720,23 @@ void mye_camera_begin_3d(Rectangle viewport, MyeSurface surface,
     /* The viewport's aspect, not the window's -- this is the whole reason
      * raylib's BeginMode3D cannot be used for a sub-rect. */
     double aspect = (double)viewport.width / (double)viewport.height;
-    double near_plane = rlGetCullDistanceNear();
-    double far_plane = rlGetCullDistanceFar();
+
+    /* Per camera, not per process. raylib's cull distances are global state
+     * (0.01 and 1000 unless a game changes them for everything at once),
+     * which is no use to a minimap that wants to see ten kilometres while the
+     * cockpit view wants precision at arm's length. 0 keeps the global
+     * default, so a camera that never asked is drawn exactly as before. */
+    double near_plane = cam_near > 0.0f ? (double)cam_near
+                                        : rlGetCullDistanceNear();
+    double far_plane = cam_far > 0.0f ? (double)cam_far
+                                      : rlGetCullDistanceFar();
+    if (far_plane <= near_plane) {
+        /* Degenerate: rlFrustum/rlOrtho would divide by zero or invert, and
+         * the camera would render nothing with no clue as to why. Fall back
+         * to the pair that is known to work. */
+        near_plane = rlGetCullDistanceNear();
+        far_plane = rlGetCullDistanceFar();
+    }
 
     double fovy = (double)camera.fovy;
     if (camera.projection == CAMERA_ORTHOGRAPHIC) {

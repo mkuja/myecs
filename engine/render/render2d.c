@@ -15,6 +15,7 @@ ECS_COMPONENT_DECLARE(MyeSprite);
 ECS_COMPONENT_DECLARE(MyeSpriteAnim);
 ECS_COMPONENT_DECLARE(MyeInterpolate);
 ECS_COMPONENT_DECLARE(MyeHidden);
+ECS_COMPONENT_DECLARE(MyeVisibilityLayers);
 ECS_COMPONENT_DECLARE(MyeCamera2D);
 ECS_COMPONENT_DECLARE(MyeRenderConfig);
 
@@ -112,6 +113,8 @@ void mye_render2d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
         const MyeInterpolate *interp = ecs_field(&iter, MyeInterpolate, 4);
         const MyeRenderTransform *render_tf =
             ecs_field(&iter, MyeRenderTransform, 5);
+        const MyeVisibilityLayers *visibility =
+            ecs_field(&iter, MyeVisibilityLayers, 6);
 
         for (int i = 0; i < iter.count && count < total; ++i) {
             /* A sprite showing the very canvas being drawn would sample the
@@ -175,6 +178,8 @@ void mye_render2d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
                 .rotation_degrees = angle * RAD2DEG,
                 .tint = sprites[i].tint,
                 .layer = sprites[i].layer,
+                .visibility = visibility != NULL ? visibility[i].mask
+                                                 : MYE_LAYERS_ALL,
             };
         }
     }
@@ -210,9 +215,18 @@ void mye_render2d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
         if (!mye_camera2d_resolve(world, cameras[c], &camera)) {
             continue;
         }
+        const MyeCamera2D *cam = ecs_get(world, cameras[c], MyeCamera2D);
+        uint32_t layers = cam != NULL ? cam->layers : 0;
+
         mye_camera_begin_2d(mye_camera_viewport(world, cameras[c]), surface,
                             camera);
         for (int32_t i = 0; i < count; ++i) {
+            /* The rule mye_camera_sees states, applied to the masks already
+             * in hand. A camera with no layers set -- every camera that
+             * predates the field -- draws the list exactly as before. */
+            if (layers != 0 && (layers & items[i].visibility) == 0) {
+                continue;
+            }
             DrawTexturePro(*items[i].texture, items[i].source, items[i].dest,
                            items[i].origin, items[i].rotation_degrees,
                            items[i].tint);
@@ -513,6 +527,9 @@ void MyeRender2dModuleImport(ecs_world_t *world)
     ECS_COMPONENT_DEFINE(world, MyeSpriteAnim);
     ECS_COMPONENT_DEFINE(world, MyeInterpolate);
     ECS_COMPONENT_DEFINE(world, MyeHidden);
+    /* Defined here, before the sprite query names it, and used by the 3D pass
+     * too: layers belong to drawing, and both renderers do the same drawing. */
+    ECS_COMPONENT_DEFINE(world, MyeVisibilityLayers);
     ECS_COMPONENT_DEFINE(world, MyeCamera2D);
     ECS_COMPONENT_DEFINE(world, MyeRenderConfig);
 
@@ -536,6 +553,10 @@ void MyeRender2dModuleImport(ecs_world_t *world)
             /* Present when the entity takes part in the transform hierarchy;
              * this is where the blended parent chain has actually put it. */
             { .id = ecs_id(MyeRenderTransform), .inout = EcsIn,
+              .oper = EcsOptional },
+            /* Optional, and absent on almost everything: a sprite that names
+             * no layers is drawn by every camera. */
+            { .id = ecs_id(MyeVisibilityLayers), .inout = EcsIn,
               .oper = EcsOptional },
             { .id = ecs_id(MyeHidden), .oper = EcsNot },
         },

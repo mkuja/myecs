@@ -498,6 +498,224 @@ TEST(a_screen_point_resolves_to_the_camera_whose_viewport_contains_it)
     ASSERT_EQ_INT(0, mye_shutdown(world));
 }
 
+/* --- layers -------------------------------------------------------------- */
+
+/* Layer masks are pure data, so the rule is checked here rather than through
+ * a window; that the passes actually apply it is a pixel test
+ * (test_int_render_cameras.c). */
+TEST(a_camera_draws_only_the_layers_it_shares)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    /* A blip on layer 1 (bit 1), the minimap-shows-blips case. */
+    ecs_entity_t blip = mye_spawn_2d(world, (Vector2){ 0.0f, 0.0f });
+    ecs_set(world, blip, MyeVisibilityLayers, { .mask = 2 });
+
+    ecs_entity_t minimap = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f },
+                                              1.0f);
+    MyeCamera2D *m = ecs_get_mut(world, minimap, MyeCamera2D);
+    m->layers = 2;
+    ecs_modified(world, minimap, MyeCamera2D);
+
+    ecs_entity_t main_view = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f },
+                                                1.0f);
+    MyeCamera2D *v = ecs_get_mut(world, main_view, MyeCamera2D);
+    v->layers = 1; /* layer 0 only */
+    ecs_modified(world, main_view, MyeCamera2D);
+    mye_progress(world, FIXED_DT);
+
+    ASSERT_TRUE(mye_camera_sees(world, minimap, blip));
+    ASSERT_FALSE(mye_camera_sees(world, main_view, blip));
+
+    /* Any bit matching is enough -- a camera watching several layers. */
+    v = ecs_get_mut(world, main_view, MyeCamera2D);
+    v->layers = 1 | 2;
+    ecs_modified(world, main_view, MyeCamera2D);
+    ASSERT_TRUE(mye_camera_sees(world, main_view, blip));
+
+    /* A 3D camera applies the same rule; there is only one rule. */
+    ecs_entity_t cam3d = mye_camera3d_spawn(world, (Vector3){ 0.0f, 0.0f, 5.0f },
+                                            (Vector3){ 0.0f, 0.0f, 0.0f },
+                                            60.0f);
+    MyeCamera3D *c = ecs_get_mut(world, cam3d, MyeCamera3D);
+    c->layers = 4;
+    ecs_modified(world, cam3d, MyeCamera3D);
+    ASSERT_FALSE(mye_camera_sees(world, cam3d, blip));
+    c = ecs_get_mut(world, cam3d, MyeCamera3D);
+    c->layers = 2;
+    ecs_modified(world, cam3d, MyeCamera3D);
+    ASSERT_TRUE(mye_camera_sees(world, cam3d, blip));
+
+    /* Neither of these draws anything, so neither sees anything. */
+    ASSERT_FALSE(mye_camera_sees(world, blip, blip));
+    ASSERT_FALSE(mye_camera_sees(world, minimap, 0));
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* The default at both ends is deliberately generous, so that nothing existing
+ * changes and no field left unset can make anything invisible. */
+TEST(an_entity_with_no_visibility_layers_is_visible_to_every_camera)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t plain = mye_spawn_2d(world, (Vector2){ 0.0f, 0.0f });
+
+    ecs_entity_t any = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f },
+                                          1.0f); /* layers = 0 */
+    ecs_entity_t masked = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f },
+                                             1.0f);
+    MyeCamera2D *c = ecs_get_mut(world, masked, MyeCamera2D);
+    c->layers = 4;
+    ecs_modified(world, masked, MyeCamera2D);
+    mye_progress(world, FIXED_DT);
+
+    /* Unlabelled: drawn by the camera that named no layers, and by the one
+     * that named layer 2. An entity that says nothing is on every layer. */
+    ASSERT_TRUE(mye_camera_sees(world, any, plain));
+    ASSERT_TRUE(mye_camera_sees(world, masked, plain));
+
+    /* And a camera that named no layers draws a labelled entity, whatever it
+     * is labelled with: 0 means "do not filter", not "layer 0". */
+    ecs_entity_t labelled = mye_spawn_2d(world, (Vector2){ 0.0f, 0.0f });
+    ecs_set(world, labelled, MyeVisibilityLayers, { .mask = 8 });
+    ASSERT_TRUE(mye_camera_sees(world, any, labelled));
+
+    /* The way to hide something from every masked camera is to say so: an
+     * empty mask is on no layer at all. */
+    ecs_entity_t nowhere = mye_spawn_2d(world, (Vector2){ 0.0f, 0.0f });
+    ecs_set(world, nowhere, MyeVisibilityLayers, { .mask = 0 });
+    ASSERT_FALSE(mye_camera_sees(world, masked, nowhere));
+    ASSERT_TRUE(mye_camera_sees(world, any, nowhere)); /* still not filtered */
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* --- picking through a viewport ------------------------------------------ */
+
+/* The plan's named case: "a ray cast from a minimap pixel must not be
+ * interpreted as a main-view pixel". The screen point has to be brought into
+ * the camera's rect, and the projection built with the RECT's aspect -- the
+ * same two things mye_camera_begin_3d does when it draws. */
+TEST(a_ray_from_a_viewport_restricted_camera_accounts_for_the_offset)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    /* The right half of a 1280x720 window: player two. */
+    ecs_entity_t cam = mye_camera3d_spawn(world, (Vector3){ 0.0f, 0.0f, 10.0f },
+                                          (Vector3){ 0.0f, 0.0f, 0.0f }, 60.0f);
+    MyeCamera3D *c = ecs_get_mut(world, cam, MyeCamera3D);
+    c->viewport = (Rectangle){ 640.0f, 0.0f, 640.0f, 720.0f };
+    ecs_modified(world, cam, MyeCamera3D);
+    mye_progress(world, FIXED_DT);
+
+    /* The centre of THAT viewport looks straight down the camera's axis. */
+    Ray centre = mye_screen_ray_for(world, cam, (Vector2){ 960.0f, 360.0f });
+    assert_near_v3(T, centre.position, (Vector3){ 0.0f, 0.0f, 10.0f }, 0.01f,
+                   "ray origin");
+    assert_near_v3(T, centre.direction, (Vector3){ 0.0f, 0.0f, -1.0f }, 0.01f,
+                   "centre ray");
+
+    /* The centre of the WINDOW is that viewport's left edge, so its ray leans
+     * left. Ignore the offset and this is the ray above -- which is exactly
+     * how player two's clicks land in player one's world. */
+    Ray edge = mye_screen_ray_for(world, cam, (Vector2){ 640.0f, 360.0f });
+    ASSERT_TRUE(edge.direction.x < -0.4f);
+
+    /* Projecting lands in the camera's own half, at 960 rather than 640. */
+    Vector2 ahead = mye_world_to_screen_for(world, cam,
+                                            (Vector3){ 0.0f, 0.0f, 0.0f });
+    ASSERT_NEAR(960.0f, ahead.x, 0.5f);
+    ASSERT_NEAR(360.0f, ahead.y, 0.5f);
+
+    /* And with the RECT's aspect, not the window's: at ten units away the
+     * half-width of a 640x720 viewport at fov 60 is tan(30)*10*640/720 =
+     * 5.132 world units, so that point sits on its right edge. Projected
+     * against the window's aspect it would land at 1120 instead. */
+    Vector2 right_edge = mye_world_to_screen_for(world, cam,
+                                                 (Vector3){ 5.132f, 0.0f, 0.0f });
+    ASSERT_NEAR(1280.0f, right_edge.x, 1.0f);
+
+    /* Round trip: the ray under the pixel a point projects to passes through
+     * that point. */
+    Vector3 point = { 1.0f, 0.5f, 0.0f };
+    Vector2 screen = mye_world_to_screen_for(world, cam, point);
+    ASSERT_TRUE(screen.x > 640.0f && screen.x < 1280.0f);
+    Ray ray = mye_screen_ray_for(world, cam, screen);
+    Vector3 to_point = Vector3Subtract(point, ray.position);
+    Vector3 closest = Vector3Add(
+        ray.position,
+        Vector3Scale(ray.direction, Vector3DotProduct(to_point, ray.direction)));
+    ASSERT_TRUE(Vector3Distance(closest, point) < 0.01f);
+
+    /* Not a 3D camera: zero, rather than a plausible wrong answer. */
+    ecs_entity_t flat = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f }, 1.0f);
+    ASSERT_NEAR(0.0f, mye_world_to_screen_for(world, flat, point).x, 0.001f);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* Split-screen picking end to end: the same window pixel means different
+ * world points to the two players, and the implicit helpers must answer with
+ * the camera the pixel is actually in. */
+TEST(a_click_in_the_second_viewport_is_read_in_that_camera_s_world)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    ecs_entity_t left = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f },
+                                           1.0f);
+    MyeCamera2D *l = ecs_get_mut(world, left, MyeCamera2D);
+    l->viewport = (Rectangle){ 0.0f, 0.0f, 640.0f, 720.0f };
+    /* The offset is where the camera's position lands WITHIN its viewport, so
+     * each player's centre is the centre of their own half. */
+    l->offset = (Vector2){ 320.0f, 360.0f };
+    ecs_modified(world, left, MyeCamera2D);
+
+    /* Player two is a thousand units away in the same world, and draws first
+     * -- so it is also the "active" camera, which is what makes the
+     * world→screen half of this test bite. */
+    ecs_entity_t right = mye_camera2d_spawn(world, (Vector2){ 1000.0f, 0.0f },
+                                            1.0f);
+    MyeCamera2D *r = ecs_get_mut(world, right, MyeCamera2D);
+    r->viewport = (Rectangle){ 640.0f, 0.0f, 640.0f, 720.0f };
+    r->offset = (Vector2){ 320.0f, 360.0f };
+    r->order = -1;
+    ecs_modified(world, right, MyeCamera2D);
+    mye_progress(world, FIXED_DT);
+
+    /* A click in the middle of each half is that player's own centre. Read
+     * against the full window instead and the right-hand click reports
+     * (320, 0) -- a real point in player one's world, which is what makes the
+     * bug invisible. */
+    Vector2 in_right = mye_screen_to_world_2d(world, (Vector2){ 960.0f, 360.0f });
+    ASSERT_NEAR(1000.0f, in_right.x, 0.01f);
+    ASSERT_NEAR(0.0f, in_right.y, 0.01f);
+
+    Vector2 in_left = mye_screen_to_world_2d(world, (Vector2){ 320.0f, 360.0f });
+    ASSERT_NEAR(0.0f, in_left.x, 0.01f);
+    ASSERT_NEAR(0.0f, in_left.y, 0.01f);
+
+    /* And back: the active camera is player two's, whose viewport starts at
+     * x = 640, so its own position lands at 960 on the window. */
+    Vector2 screen = mye_world_to_screen_2d(world, (Vector2){ 1000.0f, 0.0f });
+    ASSERT_NEAR(960.0f, screen.x, 0.01f);
+    ASSERT_NEAR(360.0f, screen.y, 0.01f);
+
+    /* A pixel in no viewport at all has no right answer, so the active camera
+     * answers -- still through ITS rect, which is what a single-camera game
+     * has always got. Below both halves and 320 px left of player two's
+     * origin: 640 px from their centre, so 640 world units left of it. */
+    Vector2 outside = mye_screen_to_world_2d(world, (Vector2){ 320.0f, 900.0f });
+    ASSERT_NEAR(360.0f, outside.x, 0.01f);
+    ASSERT_NEAR(540.0f, outside.y, 0.01f);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
 /* An inactive camera is not drawn, but is still resolvable -- a cutscene rig
  * on standby is a normal thing to keep around. */
 TEST(an_inactive_camera_is_not_collected_but_still_resolves)
@@ -757,6 +975,10 @@ TEST_MAIN(TEST_CASE(a_root_camera_resolves_to_its_own_position_and_fov),
           TEST_CASE(every_active_camera_is_collected_in_order),
           TEST_CASE(a_zero_viewport_means_the_whole_window),
           TEST_CASE(a_screen_point_resolves_to_the_camera_whose_viewport_contains_it),
+          TEST_CASE(a_camera_draws_only_the_layers_it_shares),
+          TEST_CASE(an_entity_with_no_visibility_layers_is_visible_to_every_camera),
+          TEST_CASE(a_ray_from_a_viewport_restricted_camera_accounts_for_the_offset),
+          TEST_CASE(a_click_in_the_second_viewport_is_read_in_that_camera_s_world),
           TEST_CASE(an_inactive_camera_is_not_collected_but_still_resolves),
           TEST_CASE(render_position_blends_an_interpolated_sprite_outside_the_hierarchy),
           TEST_CASE(render_rotation_is_a_pure_rotation_even_for_a_scaled_entity),

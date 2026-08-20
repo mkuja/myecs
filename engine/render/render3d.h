@@ -70,6 +70,22 @@ typedef struct MyeCamera3D {
     int projection;  /* CAMERA_PERSPECTIVE or CAMERA_ORTHOGRAPHIC */
     bool active;
 
+    /* Clipping planes, in world units. 0 means raylib's own defaults (0.01
+     * and 1000), so a camera that never sets them draws exactly as before.
+     * A big outdoor scene wants a far plane it can see to; pushing the near
+     * plane out from 0.01 is what buys back depth precision.
+     *
+     * A far plane at or below the near one is a degenerate projection that
+     * renders nothing, so both fall back to the defaults rather than draw an
+     * empty screen. Beyond that the numbers are the game's: a near plane in
+     * front of the scene clips the scene, and that is a decision, not a bug.
+     *
+     * These reach the projection matrix only. The screen/world helpers are
+     * unaffected, because neither a screen position nor a ray direction
+     * depends on where the planes sit. */
+    float near_plane;
+    float far_plane;
+
     /* Where on the window this camera draws, in pixels. A zero-sized rect
      * means the whole window -- what a game with one camera wants, and never
      * has to think about. A minimap is a corner rect. */
@@ -78,6 +94,11 @@ typedef struct MyeCamera3D {
     /* Draw order among cameras. Higher draws later, so a minimap at order 1
      * lands on top of a world view at order 0. Ties keep entity order. */
     int order;
+
+    /* Bitmask intersected with each entity's MyeVisibilityLayers (see
+     * render2d.h): the entity is drawn when any bit matches. 0 -- the default
+     * -- sees every layer. */
+    uint32_t layers;
 
     /* Which canvas this camera renders into: a MyeCanvas entity, or 0 for
      * the window. Its viewport is then in that canvas's pixels. See

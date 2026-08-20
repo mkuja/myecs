@@ -138,6 +138,374 @@ TEST(a_second_camera_draws_what_only_it_can_see_into_its_viewport)
 }
 
 
+/* C2, through the 3D pass and a real framebuffer. Two cameras in the same
+ * place, looking at the same ball, differing in nothing but their layer mask:
+ * the one that shares the ball's layer draws it and the one that does not,
+ * does not. Drop the test and the ball floods the whole window; invert it and
+ * the corner is empty. */
+TEST(a_masked_camera_draws_only_the_meshes_that_share_its_layer)
+{
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    ecs_world_t *world = mye_init(&(mye_config){
+        .width = W, .height = H, .title = "myecs camera layers test",
+        .max_frames = 3 });
+    if (world == NULL) {
+        SKIP("no window could be created");
+    }
+
+    mye_model ball = mye_model_from_mesh(world, "test:ball",
+                                         GenMeshSphere(1.0f, 16, 16), RED);
+    ecs_entity_t blip = mye_mesh_spawn(world, ball, (Vector3){ 0.0f, 0.0f, 0.0f },
+                                       RED);
+    /* On layer 1 (bit 1) -- the minimap-shows-blips case. */
+    ecs_set(world, blip, MyeVisibilityLayers, { .mask = 2 });
+
+    /* The main view watches layer 0 only, and so must not draw it... */
+    ecs_entity_t main_view = mye_camera3d_spawn(world,
+                                                (Vector3){ 0.0f, 0.0f, 5.0f },
+                                                (Vector3){ 0.0f, 0.0f, 0.0f },
+                                                60.0f);
+    MyeCamera3D *m = ecs_get_mut(world, main_view, MyeCamera3D);
+    m->layers = 1;
+    ecs_modified(world, main_view, MyeCamera3D);
+
+    /* ...while the corner camera, from the same place, watches layer 1. */
+    Rectangle corner = { W - 160.0f, 0.0f, 160.0f, 120.0f };
+    ecs_entity_t minimap = mye_camera3d_spawn(world,
+                                              (Vector3){ 0.0f, 0.0f, 5.0f },
+                                              (Vector3){ 0.0f, 0.0f, 0.0f },
+                                              60.0f);
+    MyeCamera3D *c = ecs_get_mut(world, minimap, MyeCamera3D);
+    c->order = 1;
+    c->viewport = corner;
+    c->layers = 2;
+    ecs_modified(world, minimap, MyeCamera3D);
+
+    MyeRender3dConfig *cfg = ecs_singleton_ensure(world, MyeRender3dConfig);
+    cfg->ambient = (Color){ 255, 255, 255, 255 };
+    cfg->draw_grid = false;
+    ecs_singleton_modified(world, MyeRender3dConfig);
+
+    char path[256];
+    snprintf(path, sizeof path, "%s/mye_layers3d_%d.png",
+             getenv("TMPDIR") != NULL ? getenv("TMPDIR") : "/tmp",
+             (int)getpid());
+    mye_engine *engine = mye_engine_get(world);
+    engine->screenshot_path = path;
+
+    while (mye_running(world)) {
+        mye_progress(world, 1.0f / 60.0f);
+    }
+
+    Image shot = LoadImage(path);
+    remove(path);
+    ASSERT_TRUE(shot.data != NULL);
+
+    int red_in_corner = count_red(&shot, corner);
+    Rectangle rest = { 0.0f, 0.0f, W - 160.0f, (float)H };
+    int red_elsewhere = count_red(&shot, rest);
+    UnloadImage(shot);
+
+    ASSERT_TRUE(red_in_corner > 50);
+    ASSERT_EQ_INT(0, red_elsewhere);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* The same rule in the sprite pass, which applies it to a draw list built
+ * once and drawn by every camera -- a different piece of code, and the one
+ * where a mask stored per item can drift from the entity it came from. */
+TEST(a_masked_2d_camera_draws_only_the_sprites_that_share_its_layer)
+{
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    ecs_world_t *world = mye_init(&(mye_config){
+        .width = W, .height = H, .title = "myecs sprite layers test",
+        .max_frames = 3 });
+    if (world == NULL) {
+        SKIP("no window could be created");
+    }
+
+    /* from_image takes the Image; do not unload it here. */
+    mye_texture red_tex = mye_texture_from_image(world, "test:red",
+                                                 GenImageColor(48, 48, RED));
+    ecs_entity_t blip = mye_entity_new(world);
+    ecs_set(world, blip, MyePosition2D, { 0.0f, 0.0f });
+    ecs_set(world, blip, MyeSprite,
+            { .texture = red_tex, .origin = { 24.0f, 24.0f }, .tint = WHITE });
+    ecs_set(world, blip, MyeVisibilityLayers, { .mask = 2 });
+
+    /* Split screen. Each camera centres its own half on the world origin, so
+     * the sprite would land in the middle of both halves -- only the mask
+     * decides which one actually shows it. */
+    ecs_entity_t left = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f }, 1.0f);
+    MyeCamera2D *l = ecs_get_mut(world, left, MyeCamera2D);
+    l->viewport = (Rectangle){ 0.0f, 0.0f, W / 2.0f, (float)H };
+    l->offset = (Vector2){ W / 4.0f, H / 2.0f };
+    l->layers = 1;
+    ecs_modified(world, left, MyeCamera2D);
+
+    ecs_entity_t right = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f },
+                                            1.0f);
+    MyeCamera2D *r = ecs_get_mut(world, right, MyeCamera2D);
+    r->viewport = (Rectangle){ W / 2.0f, 0.0f, W / 2.0f, (float)H };
+    r->offset = (Vector2){ W / 4.0f, H / 2.0f };
+    r->layers = 2;
+    ecs_modified(world, right, MyeCamera2D);
+
+    char path[256];
+    snprintf(path, sizeof path, "%s/mye_layers2d_%d.png",
+             getenv("TMPDIR") != NULL ? getenv("TMPDIR") : "/tmp",
+             (int)getpid());
+    mye_engine *engine = mye_engine_get(world);
+    engine->screenshot_path = path;
+
+    while (mye_running(world)) {
+        mye_progress(world, 1.0f / 60.0f);
+    }
+
+    Image shot = LoadImage(path);
+    remove(path);
+    ASSERT_TRUE(shot.data != NULL);
+
+    Rectangle left_half = { 0.0f, 0.0f, W / 2.0f, (float)H };
+    Rectangle right_half = { W / 2.0f, 0.0f, W / 2.0f, (float)H };
+    int red_left = count_red(&shot, left_half);
+    int red_right = count_red(&shot, right_half);
+    UnloadImage(shot);
+
+    /* The whole 48x48 sprite in the half that shares its layer... */
+    ASSERT_TRUE(red_right > 2000);
+    /* ...and not one pixel of it in the half that does not. */
+    ASSERT_EQ_INT(0, red_left);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* C3: the clipping planes are per camera, not per process. Two cameras in the
+ * same place see the same two balls -- one close, one far -- and only the
+ * right-hand one has planes that exclude both. Each ball has its own third of
+ * the picture, so a near plane that was ignored and a far plane that was
+ * ignored fail different assertions. */
+TEST(per_camera_near_and_far_planes_clip_only_that_camera_s_view)
+{
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    ecs_world_t *world = mye_init(&(mye_config){
+        .width = W, .height = H, .title = "myecs camera planes test",
+        .max_frames = 3 });
+    if (world == NULL) {
+        SKIP("no window could be created");
+    }
+
+    /* Camera at z = 10 looking down -Z, fov 60, in a 320x360 viewport: the
+     * half-width at distance d is 0.5132*d. */
+    mye_model small = mye_model_from_mesh(world, "test:small",
+                                          GenMeshSphere(0.5f, 16, 16), RED);
+    mye_model large = mye_model_from_mesh(world, "test:large",
+                                          GenMeshSphere(1.5f, 16, 16), RED);
+    /* Four units away, on the left of the view. */
+    mye_mesh_spawn(world, small, (Vector3){ -1.5f, 0.0f, 6.0f }, RED);
+    /* Twenty-two away, on the right of it. */
+    mye_mesh_spawn(world, large, (Vector3){ 5.0f, 0.0f, -12.0f }, RED);
+
+    /* Left half: raylib's defaults, so both balls are inside the frustum. */
+    ecs_entity_t open = mye_camera3d_spawn(world, (Vector3){ 0.0f, 0.0f, 10.0f },
+                                           (Vector3){ 0.0f, 0.0f, 0.0f }, 60.0f);
+    MyeCamera3D *o = ecs_get_mut(world, open, MyeCamera3D);
+    o->viewport = (Rectangle){ 0.0f, 0.0f, W / 2.0f, (float)H };
+    ecs_modified(world, open, MyeCamera3D);
+
+    /* Right half: a slab from 5 to 15 units, which contains neither ball. */
+    ecs_entity_t slab = mye_camera3d_spawn(world, (Vector3){ 0.0f, 0.0f, 10.0f },
+                                           (Vector3){ 0.0f, 0.0f, 0.0f }, 60.0f);
+    MyeCamera3D *s = ecs_get_mut(world, slab, MyeCamera3D);
+    s->viewport = (Rectangle){ W / 2.0f, 0.0f, W / 2.0f, (float)H };
+    s->order = 1;
+    s->near_plane = 5.0f;
+    s->far_plane = 15.0f;
+    ecs_modified(world, slab, MyeCamera3D);
+
+    MyeRender3dConfig *cfg = ecs_singleton_ensure(world, MyeRender3dConfig);
+    cfg->ambient = (Color){ 255, 255, 255, 255 };
+    cfg->draw_grid = false;
+    ecs_singleton_modified(world, MyeRender3dConfig);
+
+    char path[256];
+    snprintf(path, sizeof path, "%s/mye_planes_%d.png",
+             getenv("TMPDIR") != NULL ? getenv("TMPDIR") : "/tmp",
+             (int)getpid());
+    mye_engine *engine = mye_engine_get(world);
+    engine->screenshot_path = path;
+
+    while (mye_running(world)) {
+        mye_progress(world, 1.0f / 60.0f);
+    }
+
+    Image shot = LoadImage(path);
+    remove(path);
+    ASSERT_TRUE(shot.data != NULL);
+
+    /* Where each ball lands, in each half. */
+    Rectangle open_near = { 0.0f, 100.0f, 106.0f, 160.0f };
+    Rectangle open_far = { 200.0f, 100.0f, 120.0f, 160.0f };
+    Rectangle slab_near = { 320.0f, 100.0f, 106.0f, 160.0f };
+    Rectangle slab_far = { 520.0f, 100.0f, 120.0f, 160.0f };
+    int open_near_red = count_red(&shot, open_near);
+    int open_far_red = count_red(&shot, open_far);
+    int slab_near_red = count_red(&shot, slab_near);
+    int slab_far_red = count_red(&shot, slab_far);
+    UnloadImage(shot);
+
+    /* The camera that set no planes sees both -- so the geometry is where the
+     * arithmetic above says, and the two assertions below mean something. */
+    ASSERT_TRUE(open_near_red > 50);
+    ASSERT_TRUE(open_far_red > 50);
+    /* Its twin, differing only in near_plane and far_plane, sees neither: the
+     * close ball is in front of 5, the distant one beyond 15. */
+    ASSERT_EQ_INT(0, slab_near_red);
+    ASSERT_EQ_INT(0, slab_far_red);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* A HUD drawn in MyeOnDrawUI after a corner camera. rlViewport and the
+ * scissor are global state: leave them set to the last camera's rect and the
+ * HUD is squeezed into that corner and clipped to it -- which reads as a
+ * layout bug, in a game whose layout is fine. */
+static void DrawHudBar(ecs_iter_t *it)
+{
+    (void)ecs_field(it, MyeRenderConfig, 0);
+    /* Full width, along the bottom: as far from the camera's corner as the
+     * window allows. */
+    DrawRectangle(0, H - 40, W, 40, RED);
+}
+
+TEST(the_viewport_and_scissor_are_restored_before_the_hud_draws)
+{
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    ecs_world_t *world = mye_init(&(mye_config){
+        .width = W, .height = H, .title = "myecs viewport restore test",
+        /* One frame: nothing else gets a chance to put the viewport back. */
+        .max_frames = 1 });
+    if (world == NULL) {
+        SKIP("no window could be created");
+    }
+
+    /* A camera confined to the top-right corner, with something to draw so
+     * the pass really runs. */
+    mye_model ball = mye_model_from_mesh(world, "test:ball",
+                                         GenMeshSphere(1.0f, 12, 12), WHITE);
+    mye_mesh_spawn(world, ball, (Vector3){ 0.0f, 0.0f, 0.0f }, WHITE);
+    ecs_entity_t cam = mye_camera3d_spawn(world, (Vector3){ 0.0f, 0.0f, 5.0f },
+                                          (Vector3){ 0.0f, 0.0f, 0.0f }, 60.0f);
+    MyeCamera3D *c = ecs_get_mut(world, cam, MyeCamera3D);
+    c->viewport = (Rectangle){ W - 160.0f, 0.0f, 160.0f, 120.0f };
+    ecs_modified(world, cam, MyeCamera3D);
+
+    ECS_SYSTEM(world, DrawHudBar, MyeOnDrawUI, MyeRenderConfig);
+
+    char path[256];
+    snprintf(path, sizeof path, "%s/mye_restore_%d.png",
+             getenv("TMPDIR") != NULL ? getenv("TMPDIR") : "/tmp",
+             (int)getpid());
+    mye_engine *engine = mye_engine_get(world);
+    engine->screenshot_path = path;
+
+    while (mye_running(world)) {
+        mye_progress(world, 1.0f / 60.0f);
+    }
+
+    Image shot = LoadImage(path);
+    remove(path);
+    ASSERT_TRUE(shot.data != NULL);
+
+    /* The bar, at both ends of the window and nowhere near the camera's
+     * rect. Clipped to that rect, either count is zero. */
+    Rectangle bar_left = { 0.0f, H - 40.0f, 200.0f, 40.0f };
+    Rectangle bar_right = { W - 200.0f, H - 40.0f, 200.0f, 40.0f };
+    int red_left = count_red(&shot, bar_left);
+    int red_right = count_red(&shot, bar_right);
+    UnloadImage(shot);
+
+    ASSERT_TRUE(red_left > 5000);  /* 200x40 = 8000 px of bar */
+    ASSERT_TRUE(red_right > 5000);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* The screenshot is of the WINDOW. Canvases draw first, each into its own
+ * framebuffer, and the frame's pixels are read at the end of the window's
+ * passes -- so a canvas left bound, or a read taken from the wrong
+ * framebuffer, would hand back a small square of the canvas instead of the
+ * picture the player saw. Both halves are asserted: the size, and that the
+ * canvas's red is only where the window put it. */
+TEST(the_screenshot_is_of_the_window_not_the_last_canvas)
+{
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    ecs_world_t *world = mye_init(&(mye_config){
+        .width = W, .height = H, .title = "myecs screenshot identity test",
+        .max_frames = 1 });
+    if (world == NULL) {
+        SKIP("no window could be created");
+    }
+
+    /* An all-red canvas: its clear colour is enough, no camera needed. */
+    ecs_entity_t canvas = mye_canvas_create(world, "test:red", 128, 128, RED);
+    ASSERT_TRUE(canvas != 0);
+
+    /* Shown in the middle of the window, so red is present but confined. */
+    mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f }, 1.0f);
+    Rectangle shown = { (float)W / 2.0f - 64.0f, (float)H / 2.0f - 64.0f,
+                        128.0f, 128.0f };
+    ecs_entity_t display = mye_entity_new(world);
+    ecs_set(world, display, MyePosition2D, { 0.0f, 0.0f });
+    ecs_set(world, display, MyeSprite,
+            { .texture = mye_canvas_texture(world, canvas),
+              .source = mye_canvas_source_rect(world, canvas),
+              .origin = { 64.0f, 64.0f },
+              .tint = WHITE });
+
+    char path[256];
+    snprintf(path, sizeof path, "%s/mye_shot_identity_%d.png",
+             getenv("TMPDIR") != NULL ? getenv("TMPDIR") : "/tmp",
+             (int)getpid());
+    mye_engine *engine = mye_engine_get(world);
+    engine->screenshot_path = path;
+
+    while (mye_running(world)) {
+        mye_progress(world, 1.0f / 60.0f);
+    }
+
+    /* Read while the window is still up: this is what the shot must match. */
+    int render_width = GetRenderWidth();
+    int render_height = GetRenderHeight();
+
+    Image shot = LoadImage(path);
+    remove(path);
+    ASSERT_TRUE(shot.data != NULL);
+
+    /* The window's size, not the canvas's 128x128. The live render size is
+     * asked for rather than assumed from the config, because HiDPI makes them
+     * differ -- but raylib reports the CURRENT framebuffer's size there, so
+     * with a canvas left bound it would agree with a shot of that canvas.
+     * Hence the absolute floor as well: it is what catches that. */
+    ASSERT_EQ_INT(render_width, shot.width);
+    ASSERT_EQ_INT(render_height, shot.height);
+    ASSERT_TRUE(shot.width > 128 && shot.height > 128);
+
+    /* And the canvas's pixels are where the window drew them -- not filling
+     * the frame, which is what a shot OF the canvas would be. */
+    int red_shown = count_red(&shot, shown);
+    int red_total = count_red(&shot, (Rectangle){ 0.0f, 0.0f,
+                                                  (float)shot.width,
+                                                  (float)shot.height });
+    UnloadImage(shot);
+
+    ASSERT_TRUE(red_shown > 10000); /* most of a 128x128 square */
+    ASSERT_EQ_INT(red_shown, red_total);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
 /* A canvas renders what only its camera can see, and the window shows the
  * canvas. This is the whole feature in one picture: red must appear inside
  * the sprite that displays the canvas, and nowhere else.
@@ -667,6 +1035,11 @@ TEST(resizing_the_window_does_not_displace_what_cameras_draw)
 }
 
 TEST_MAIN(TEST_CASE(a_second_camera_draws_what_only_it_can_see_into_its_viewport),
+          TEST_CASE(a_masked_camera_draws_only_the_meshes_that_share_its_layer),
+          TEST_CASE(a_masked_2d_camera_draws_only_the_sprites_that_share_its_layer),
+          TEST_CASE(per_camera_near_and_far_planes_clip_only_that_camera_s_view),
+          TEST_CASE(the_viewport_and_scissor_are_restored_before_the_hud_draws),
+          TEST_CASE(the_screenshot_is_of_the_window_not_the_last_canvas),
           TEST_CASE(a_canvas_shows_its_own_camera_and_the_window_shows_the_canvas),
           TEST_CASE(a_canvas_can_be_displayed_on_a_mesh),
           TEST_CASE(a_tint_stays_per_instance_and_does_not_compound_over_frames),

@@ -344,18 +344,29 @@ static void upload_lights(ecs_world_t *world, const MyeRender3dState *state,
     }
 }
 
-/* Draws the scene once, through one camera, into one viewport. */
+/* Draws the scene once, through one camera, into one viewport.
+ *
+ * `camera_entity` is the camera being drawn through and `camera` is what it
+ * resolved to: the entity still carries what the raylib struct has no room
+ * for -- the viewport rect, the layer mask, the clipping planes. */
 static void draw_through(ecs_world_t *world, const MyeRender3dState *state,
-                         const MyeRender3dConfig *config, Camera3D camera,
-                         Rectangle viewport, MyeSurface surface,
-                         MyeCameraClear clear, ecs_entity_t target)
+                         const MyeRender3dConfig *config,
+                         ecs_entity_t camera_entity, Camera3D camera,
+                         MyeSurface surface, MyeCameraClear clear,
+                         ecs_entity_t target)
 {
     bool use_pbr = config->use_pbr && state->pbr_ready;
     if (state->shader_ready || use_pbr) {
         upload_lights(world, state, config, camera);
     }
 
-    mye_camera_begin_3d(viewport, surface, camera, clear);
+    const MyeCamera3D *cam = ecs_get(world, camera_entity, MyeCamera3D);
+    uint32_t layers = cam != NULL ? cam->layers : 0;
+
+    mye_camera_begin_3d(mye_camera_viewport(world, camera_entity), surface,
+                        camera, clear,
+                        cam != NULL ? cam->near_plane : 0.0f,
+                        cam != NULL ? cam->far_plane : 0.0f);
 
     if (config->draw_grid) {
         DrawGrid(config->grid_slices, config->grid_spacing);
@@ -368,6 +379,14 @@ static void draw_through(ecs_world_t *world, const MyeRender3dState *state,
             ecs_field(&iter, MyeWorldTransform, 1);
 
         for (int i = 0; i < iter.count; ++i) {
+            /* Layers, when the camera named any. A camera with layers == 0 --
+             * every camera that predates the field -- takes the same path it
+             * always did, without so much as a lookup. */
+            if (layers != 0 &&
+                !mye_camera_sees(world, camera_entity, iter.entities[i])) {
+                continue;
+            }
+
             const Model *model = mye_model_get(world, instances[i].model);
             if (model == NULL || model->meshCount == 0) {
                 continue;
@@ -515,8 +534,7 @@ void mye_render3d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
             clear = already_cleared ? MYE_CAMERA_CLEAR_NONE
                                     : MYE_CAMERA_CLEAR_DEPTH;
         }
-        draw_through(world, state, config, camera,
-                     mye_camera_viewport(world, cameras[i]), surface, clear,
+        draw_through(world, state, config, cameras[i], camera, surface, clear,
                      target);
     }
 }
@@ -614,6 +632,13 @@ static void render3d_fini(ecs_world_t *world, void *ctx)
 void MyeRender3dModuleImport(ecs_world_t *world)
 {
     ECS_MODULE(world, MyeRender3dModule);
+
+    /* MyeHidden and MyeVisibilityLayers belong to the 2D module -- they are
+     * drawing, and both renderers draw -- and this pass names both. Import
+     * rather than trust the caller's order: built too early, the mesh query
+     * matches nothing and the screen is empty with no error anywhere.
+     * Re-import is a no-op when the engine has already done it. */
+    ECS_IMPORT(world, MyeRender2dModule);
 
     ECS_COMPONENT_DEFINE(world, MyeMeshInstance);
     ECS_COMPONENT_DEFINE(world, MyeModelAnimator);

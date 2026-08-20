@@ -139,8 +139,26 @@ int mye_camera2d_collect_for(const ecs_world_t *world, ecs_entity_t target,
 
 /* The camera whose viewport contains a screen point, or 0. Split-screen
  * picking needs this: a click in player two's half read against player one's
- * camera silently lands somewhere else in the world. */
+ * camera silently lands somewhere else in the world. The screen→world helpers
+ * below use it, so ordinary picking is already right; call it directly when
+ * the game needs to know WHICH camera, not just what is under the cursor.
+ *
+ * Topmost first: with two cameras over the same pixel the one drawn last is
+ * the one the player thinks they clicked on. 2D cameras are considered before
+ * 3D ones, since a 2D camera over a 3D world is the HUD case. */
 ecs_entity_t mye_camera_at_screen(const ecs_world_t *world, Vector2 screen);
+
+/* Whether this camera draws this entity, by the layer rule both built-in
+ * passes apply: a camera whose `layers` is 0 sees every layer; otherwise the
+ * entity is drawn when any bit of its MyeVisibilityLayers mask matches. An
+ * entity with no MyeVisibilityLayers is on every layer, so every camera sees
+ * it -- see render2d.h for why absence is generous rather than exclusive.
+ *
+ * Public because a game that draws in a system of its own should be able to
+ * obey the same rule the engine does instead of reinventing a near-miss of
+ * it, and because it makes the rule checkable without a window. */
+bool mye_camera_sees(const ecs_world_t *world, ecs_entity_t camera,
+                     ecs_entity_t entity);
 
 /* The rect a camera draws into, resolving "zero means the whole window". */
 Rectangle mye_camera_viewport(const ecs_world_t *world, ecs_entity_t camera);
@@ -183,8 +201,12 @@ typedef enum MyeCameraClear {
     MYE_CAMERA_CLEAR_ALL,
 } MyeCameraClear;
 
+/* `near_plane` / `far_plane` are MyeCamera3D's, in world units; 0 means
+ * raylib's global defaults, and a far plane at or below the near one falls
+ * back to them rather than build a projection that renders nothing. */
 void mye_camera_begin_3d(Rectangle viewport, MyeSurface surface,
-                         Camera3D camera, MyeCameraClear clear);
+                         Camera3D camera, MyeCameraClear clear,
+                         float near_plane, float far_plane);
 void mye_camera_end_3d(void);
 
 /* --------------------------------------------------------------- spawning -- */
@@ -216,9 +238,23 @@ float mye_camera_get_fov(const ecs_world_t *world, ecs_entity_t camera);
 
 /* ------------------------------------------------- screen and world space -- */
 
-/* All of these use the active camera, so call them from MyeOnCamera or
- * later to get this frame's view. They work headless, using the configured
- * window size, so picking logic is testable without a window. */
+/* Call these from MyeOnCamera or later to get this frame's view. They work
+ * headless, using the configured window size, so picking logic is testable
+ * without a window.
+ *
+ * WHICH CAMERA. Going screen→world, the POINT decides: the helper picks the
+ * camera whose viewport the pixel is in (mye_camera_at_screen), because a
+ * click in player two's half read through player one's camera lands somewhere
+ * else in the world entirely -- invisible until two players are on screen.
+ * Going world→screen there is no point to ask, so the active camera answers.
+ * A pixel inside no viewport at all falls back to the active camera, which is
+ * the only answer available and is exactly what a single-camera game gets.
+ *
+ * Every one of them accounts for the camera's viewport rect: a sub-viewport
+ * shifts the pixel by the rect's origin and projects with the rect's aspect,
+ * so screen coordinates are always window coordinates, whichever camera
+ * answered. With one full-window camera all of that is the identity, which is
+ * the code path a single-camera game has always taken. */
 
 /* Where a world point lands on screen. */
 Vector2 mye_world_to_screen(const ecs_world_t *world, Vector3 point);
@@ -229,5 +265,20 @@ Ray mye_screen_ray(const ecs_world_t *world, Vector2 screen);
 
 /* The world point under a screen pixel, for a 2D camera. */
 Vector2 mye_screen_to_world_2d(const ecs_world_t *world, Vector2 screen);
+
+/* The explicit-camera forms, so a game with several cameras is not forced
+ * through "the active one" -- projecting a waypoint into the minimap, or
+ * casting a ray from a pixel of a view the cursor is not in.
+ *
+ * `screen` is in the coordinates of the surface that camera draws on: window
+ * pixels for a window camera, canvas pixels for one whose target is a canvas
+ * (where a window mouse position means nothing until the game maps it back).
+ * The camera's viewport offset and aspect are accounted for, so a ray cast
+ * from a minimap pixel is a ray in the minimap's view and not in the main
+ * one's. Zero if `cam` is not a 3D camera. */
+Vector2 mye_world_to_screen_for(const ecs_world_t *world, ecs_entity_t cam,
+                                Vector3 point);
+Ray mye_screen_ray_for(const ecs_world_t *world, ecs_entity_t cam,
+                       Vector2 screen);
 
 #endif /* MYE_RENDER_CAMERA_H */
