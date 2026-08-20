@@ -1676,8 +1676,9 @@ legitimate — the number does not depend on how fast the test machine is.
 
 Structure game code so this is possible: put the setup and systems in a library
 and keep `main` to three lines. `examples/02_asteroids` does exactly this
-(`asteroids.c` is a static library; `main.c` is the loop), which is why
-`test_int_asteroids` can drive the real game.
+(`asteroids.c` is the game, `scenes.c` the menu-to-play flow, both static
+libraries; `main.c` is the loop), which is why `test_int_asteroids` can drive
+the real game and `test_int_asteroids_scenes` the flow around it.
 
 For anything that must actually draw, run it as a program with a frame limit and
 a screenshot, and label the test `render` so the TSan build can skip it:

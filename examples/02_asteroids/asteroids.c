@@ -232,11 +232,25 @@ static bool wrap_position(MyePosition2D *p)
     return wrapped;
 }
 
+/* Every gameplay entity is born here, and it matters that it is
+ * mye_entity_new rather than the shorter ecs_new_w_pair: only mye_entity_new
+ * tags the entity for the active scene, and untagged entities survive a scene
+ * switch. That would leave the old ship and half a wave of rocks drifting
+ * through the menu. Adding the EcsIsA pair afterwards costs nothing --
+ * MyeSceneOf is (OnInstantiate, DontInherit), so instantiating the prefab
+ * cannot disturb the ownership tag. */
+static ecs_entity_t spawn_from_prefab(ecs_world_t *world, ecs_entity_t prefab)
+{
+    ecs_entity_t e = mye_entity_new(world);
+    ecs_add_pair(world, e, EcsIsA, prefab);
+    return e;
+}
+
 static ecs_entity_t spawn_ship(ecs_world_t *world, const GameState *state)
 {
     /* Collider, Ship and MyeSprite all arrive from the prefab; Ship and
      * MyeSprite as private copies thanks to ecs_set_override. */
-    ecs_entity_t e = ecs_new_w_pair(world, EcsIsA, state->prefab_ship);
+    ecs_entity_t e = spawn_from_prefab(world, state->prefab_ship);
     ecs_set(world, e, MyePosition2D, { SCREEN_W * 0.5f, SCREEN_H * 0.5f });
     ecs_set(world, e, MyeRotation2D, { -PI * 0.5f }); /* nose up */
     ecs_set(world, e, Velocity, { 0.0f, 0.0f });
@@ -255,7 +269,7 @@ static void spawn_rock(ecs_world_t *world, GameState *state, int size, float x,
     speed *= (4.0f - (float)size) * 0.5f;
 
     /* Collider, Rock and MyeSprite all come from the prefab. */
-    ecs_entity_t e = ecs_new_w_pair(world, EcsIsA, state->prefab_rock[size - 1]);
+    ecs_entity_t e = spawn_from_prefab(world, state->prefab_rock[size - 1]);
     ecs_set(world, e, MyePosition2D, { x, y });
     ecs_set(world, e, MyeRotation2D, { 0.0f });
     ecs_set(world, e, Velocity, { cosf(angle) * speed, sinf(angle) * speed });
@@ -272,7 +286,7 @@ static void spawn_explosion(ecs_world_t *world, const GameState *state,
 
     /* The sprite and the animation playhead arrive as private copies, so
      * each explosion runs its own flipbook. */
-    ecs_entity_t e = ecs_new_w_pair(world, EcsIsA, state->prefab_explosion);
+    ecs_entity_t e = spawn_from_prefab(world, state->prefab_explosion);
     ecs_set(world, e, MyePosition2D, { x, y });
     ecs_set(world, e, MyeScale2D, { scale, scale });
 }
@@ -360,7 +374,7 @@ static void ShipControl(ecs_iter_t *it)
              * Lifetime arrives as a private copy. Only the trajectory
              * differs per shot. */
             ecs_entity_t bullet =
-                ecs_new_w_pair(world, EcsIsA, state->prefab_bullet);
+                spawn_from_prefab(world, state->prefab_bullet);
             ecs_set(world, bullet, MyePosition2D, { nose_x, nose_y });
             ecs_set(world, bullet, Velocity,
                     { cosf(rot[i].angle) * BULLET_SPEED + vel[i].x,
@@ -550,43 +564,15 @@ static void NextWaveWhenClear(ecs_iter_t *it)
     (void)it;
     ecs_world_t *world = it->world;
     GameState *state = ecs_singleton_ensure(world, GameState);
-    if (state == NULL || state->game_over || state->rocks_alive > 0) {
+    /* The `playing` check is what keeps the menu's backdrop rocks from being
+     * mistaken for a cleared wave and topped up. */
+    if (state == NULL || !state->playing || state->game_over ||
+        state->rocks_alive > 0) {
         return;
     }
 
     ++state->wave;
     spawn_wave(world, state, STARTING_ROCKS + state->wave);
-}
-
-/* --------------------------------------------------------------- restart -- */
-
-static void RestartOnRequest(ecs_iter_t *it)
-{
-    (void)it;
-    ecs_world_t *world = it->world;
-    if (!mye_action_pressed(world, ACT_RESTART)) {
-        return;
-    }
-
-    GameState *state = ecs_singleton_ensure(world, GameState);
-    if (state == NULL || !state->game_over) {
-        return;
-    }
-
-    /* Clear the field: rocks, bullets, and the ship all go. */
-    ecs_delete_with(world, ecs_id(Rock));
-    ecs_delete_with(world, ecs_id(Bullet));
-    ecs_delete_with(world, ecs_id(Ship));
-    ecs_delete_with(world, ecs_id(Explosion));
-
-    state->score = 0;
-    state->lives = STARTING_LIVES;
-    state->rocks_alive = 0;
-    state->wave = 0;
-    state->game_over = false;
-
-    spawn_ship(world, state);
-    spawn_wave(world, state, STARTING_ROCKS);
 }
 
 /* -------------------------------------------------------------------- UI -- */
@@ -595,6 +581,13 @@ static void DrawHud(ecs_iter_t *it)
 {
     const GameState *state = ecs_field(it, GameState, 0);
     ecs_world_t *world = it->world;
+
+    /* The score belongs to the game; the menu draws its own screen. Rather
+     * than ask which scene is up -- this file does not know scenes exist --
+     * the HUD simply draws while a game is running. */
+    if (!state->playing) {
+        return;
+    }
 
     /* Per-frame scratch: freed automatically at the top of the next frame. */
     mye_allocator frame = mye_frame_allocator(world);
@@ -607,7 +600,7 @@ static void DrawHud(ecs_iter_t *it)
 
     if (state->game_over) {
         const char *over = "GAME OVER";
-        const char *hint = "press R to play again";
+        const char *hint = "returning to the menu...";
         DrawText(over, SCREEN_W / 2 - MeasureText(over, 56) / 2,
                  SCREEN_H / 2 - 60, 56, RED);
         DrawText(hint, SCREEN_W / 2 - MeasureText(hint, 22) / 2,
@@ -644,7 +637,7 @@ static void state_rocks_query_init(ecs_world_t *world)
     });
 }
 
-void asteroids_setup(ecs_world_t *world)
+void asteroids_register(ecs_world_t *world)
 {
     ECS_COMPONENT_DEFINE(world, Velocity);
     ECS_COMPONENT_DEFINE(world, Collider);
@@ -680,7 +673,7 @@ void asteroids_setup(ecs_world_t *world)
     mye_input_bind_key(world, ACT_THRUST, KEY_UP);
     mye_input_bind_key(world, ACT_THRUST, KEY_W);
     mye_input_bind_key(world, ACT_FIRE, KEY_SPACE);
-    mye_input_bind_key(world, ACT_RESTART, KEY_R);
+    mye_input_bind_key(world, ACT_CONFIRM, KEY_ENTER);
 
     ecs_singleton_set(world, GameState, { .lives = STARTING_LIVES });
     state_rocks_query_init(world);
@@ -728,7 +721,6 @@ void asteroids_setup(ecs_world_t *world)
     ECS_SYSTEM(world, NextWaveWhenClear, MyeOnFixedUpdate, GameState);
     ECS_SYSTEM(world, DespawnFinishedExplosions, EcsPostUpdate,
                [in] MyeSpriteAnim, [in] Explosion);
-    ECS_SYSTEM(world, RestartOnRequest, EcsOnUpdate, GameState);
 
     /* Presentation: variable rate. Drawing systems are only registered when
      * there is a window; headless worlds run the simulation alone. */
@@ -738,9 +730,60 @@ void asteroids_setup(ecs_world_t *world)
                    MyeSprite);
         ECS_SYSTEM(world, DrawHud, MyeOnDrawUI, [in] GameState);
     }
+}
+
+void asteroids_start(ecs_world_t *world)
+{
+    GameState *state = ecs_singleton_ensure(world, GameState);
+    if (state == NULL) {
+        return;
+    }
+
+    state->score = 0;
+    state->lives = STARTING_LIVES;
+    state->rocks_alive = 0;
+    state->wave = 0;
+    state->game_over = false;
+    state->playing = true;
 
     spawn_ship(world, state);
     spawn_wave(world, state, STARTING_ROCKS);
+}
+
+void asteroids_stop(ecs_world_t *world)
+{
+    GameState *state = ecs_singleton_ensure(world, GameState);
+    if (state == NULL) {
+        return;
+    }
+    state->playing = false;
+    /* No ecs_delete_with here, deliberately. The ship, the rocks, the bullets
+     * in flight and the explosions still burning belong to the play scene,
+     * and unloading it deletes exactly them. That includes the ones gameplay
+     * spawned mid-run, which are precisely the ones a hand-written cleanup
+     * list forgets -- this function used to be four ecs_delete_with calls,
+     * and it was one kind of entity away from being wrong. */
+}
+
+void asteroids_spawn_backdrop(ecs_world_t *world, int count)
+{
+    GameState *state = ecs_singleton_ensure(world, GameState);
+    if (state == NULL) {
+        return;
+    }
+    /* These count towards rocks_alive like any other rock. Harmless: nothing
+     * reads it while `playing` is false, and asteroids_start zeroes it. */
+    for (int i = 0; i < count; ++i) {
+        spawn_rock(world, state, GetRandomValue(1, 3),
+                   (float)GetRandomValue(0, SCREEN_W),
+                   (float)GetRandomValue(0, SCREEN_H));
+    }
+}
+
+void asteroids_setup(ecs_world_t *world)
+{
+    asteroids_register(world);
+    asteroids_start(world);
 }
 
 void asteroids_teardown(ecs_world_t *world)
