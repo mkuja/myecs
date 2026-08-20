@@ -21,6 +21,7 @@ Design documents for a 2D + 3D game engine in strict C11, built on
 | [12-networking.md](12-networking.md) | WebSocket transport for web + native (planned, N0–N2) |
 | [13-cameras.md](13-cameras.md) | Multi-camera design, after Bevy and Godot (C1 built; C2–C3 planned) |
 | [14-canvases.md](14-canvases.md) | Render-target canvases: cameras render into textures (planned, C4; hand-off ready) |
+| [15-gaps.md](15-gaps.md) | Audit: everything plans 00-14 promised that was never built, verified against the code |
 
 **Key decisions**: flecs as the ECS (pure C99, archetype-based, multithreaded
 pipeline) · concurrency from libraries, not hand-rolled · CMake + C11 with
