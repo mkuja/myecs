@@ -12,6 +12,7 @@ add_library(engine STATIC
     render/canvas.c
     render/render2d.c
     render/render3d.c
+    render/text.c
     scene/scene.c
     scene/serialize.c
     scene/transform.c

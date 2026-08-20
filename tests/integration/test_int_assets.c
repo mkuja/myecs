@@ -49,6 +49,58 @@ static ecs_world_t *make_world(void)
     return mye_init(&(mye_config){ .headless = true });
 }
 
+/* A real TTF on disk, which this repository deliberately does not carry:
+ * binaries do not belong in git, and raylib can export an image or a wave but
+ * has no way to write a font, so there is nothing to generate one from
+ * either. The candidates are, in order, an explicit override, the project's
+ * own asset directory, the raylib source the build fetched (which ships fonts
+ * for its own examples, and sits a couple of directories above the test
+ * binary), and two common system font paths. The font tests SKIP when none of
+ * them is there, and say so. */
+static const char *find_ttf(void)
+{
+    static char found[1024];
+    static bool searched;
+
+    if (searched) {
+        return found[0] != '\0' ? found : NULL;
+    }
+    searched = true;
+
+    const char *override = getenv("MYE_TEST_FONT");
+    if (override != NULL && override[0] != '\0' && FileExists(override)) {
+        snprintf(found, sizeof found, "%s", override);
+        return found;
+    }
+
+    static const char *relative[] = {
+        "assets/fonts/test.ttf",
+        "_deps/raylib-src/examples/text/resources/anonymous_pro_bold.ttf",
+    };
+    for (size_t i = 0; i < sizeof relative / sizeof relative[0]; ++i) {
+        char resolved[1024];
+        if (mye_asset_path(relative[i], resolved, sizeof resolved)) {
+            snprintf(found, sizeof found, "%s", resolved);
+            return found;
+        }
+    }
+
+    static const char *absolute[] = {
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    };
+    for (size_t i = 0; i < sizeof absolute / sizeof absolute[0]; ++i) {
+        if (FileExists(absolute[i])) {
+            snprintf(found, sizeof found, "%s", absolute[i]);
+            return found;
+        }
+    }
+
+    found[0] = '\0';
+    return NULL;
+}
+
 TEST(a_loaded_texture_is_valid_and_resolvable)
 {
     ecs_world_t *world = make_world();
@@ -182,8 +234,178 @@ TEST(a_generated_texture_needs_no_file)
     ASSERT_EQ_INT(0, mye_shutdown(world));
 }
 
+/* --- fonts ---------------------------------------------------------------- */
+
+/* raylib rasterises a glyph atlas at load time, so the size is baked into
+ * what the slot holds. Deduping on the path alone would hand a 16px atlas to
+ * whoever asked for 48px -- text that comes out blurry with nothing on screen
+ * to say why. */
+TEST(a_font_is_keyed_by_path_and_size)
+{
+    const char *ttf = find_ttf();
+    if (ttf == NULL) {
+        SKIP("no TTF available; set MYE_TEST_FONT or see find_ttf()");
+    }
+
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    mye_font small = mye_font_load(world, ttf, 16);
+    mye_font again = mye_font_load(world, ttf, 16);
+    mye_font large = mye_font_load(world, ttf, 48);
+
+    ASSERT_TRUE(mye_font_valid(world, small));
+    ASSERT_TRUE(mye_font_valid(world, again));
+    ASSERT_TRUE(mye_font_valid(world, large));
+
+    /* Same file, same size: one slot, shared. */
+    ASSERT_EQ_INT((int)small.index, (int)again.index);
+    ASSERT_EQ_INT((int)small.generation, (int)again.generation);
+    /* Same file, different size: a slot of its own. */
+    ASSERT_TRUE(small.index != large.index);
+
+    mye_asset_stats stats = mye_asset_stats_get(world);
+    ASSERT_EQ_INT(2, (int)stats.fonts_live);
+
+    /* Headless records the size it was asked for without uploading an atlas,
+     * which is what makes registry behaviour testable without a window. */
+    const Font *resolved = mye_font_get(world, small);
+    ASSERT_NOT_NULL(resolved);
+    ASSERT_EQ_INT(16, resolved->baseSize);
+    ASSERT_EQ_INT(48, mye_font_get(world, large)->baseSize);
+
+    /* Two loads at 16, so the slot survives the first release. */
+    mye_font_release(world, small);
+    ASSERT_TRUE(mye_font_valid(world, again));
+    mye_font_release(world, again);
+    ASSERT_TRUE(!mye_font_valid(world, again));
+    ASSERT_TRUE(mye_font_get(world, again) == NULL);
+
+    mye_font_release(world, large);
+    ASSERT_EQ_INT(0, (int)mye_asset_stats_get(world).fonts_live);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* --- failure records ------------------------------------------------------ */
+
+TEST(a_missing_font_leaves_a_failure_record)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    char path[600];
+    make_path("no_such_font.ttf", path, sizeof path);
+    remove(path);
+
+    mye_font missing = mye_font_load(world, path, 24);
+    ASSERT_TRUE(!mye_font_valid(world, missing));
+    ASSERT_TRUE(mye_font_get(world, missing) == NULL);
+    /* The default font is a GPU atlas, so a headless world has none to fall
+     * back to. In a windowed build this is what keeps missing text visible. */
+    ASSERT_TRUE(mye_font_get_or_placeholder(world, missing) == NULL);
+
+    ASSERT_EQ_INT(1, (int)mye_asset_stats_get(world).assets_failed);
+
+    /* Asking again retries in the record's own slot rather than burning a
+     * second one -- a game retrying every frame must not fill the registry. */
+    mye_font_load(world, path, 24);
+    mye_font_load(world, path, 24);
+    ASSERT_EQ_INT(1, (int)mye_asset_stats_get(world).assets_failed);
+
+    /* A different size is a different key, so a record of its own. */
+    mye_font_load(world, path, 32);
+    ASSERT_EQ_INT(2, (int)mye_asset_stats_get(world).assets_failed);
+
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* The point of keeping the key: the registry can answer "why did this not
+ * resolve", and the answer stops being true the moment the file turns up. */
+TEST(a_failure_record_becomes_the_asset_when_the_file_appears)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    char path[600];
+    make_path("appears_later.png", path, sizeof path);
+    remove(path);
+
+    mye_texture missing = mye_texture_load(world, path);
+    ASSERT_TRUE(!mye_texture_valid(world, missing));
+
+    mye_asset_stats failed = mye_asset_stats_get(world);
+    ASSERT_EQ_INT(1, (int)failed.assets_failed);
+    ASSERT_EQ_INT(0, (int)failed.textures_live);
+
+    ASSERT_TRUE(write_test_png(path, 6, 7, RED));
+
+    mye_texture now = mye_texture_load(world, path);
+    ASSERT_TRUE(mye_texture_valid(world, now));
+    ASSERT_EQ_INT(6, mye_texture_get(world, now)->width);
+
+    /* assets_failed back to zero is the assertion that matters: the retry
+     * took over the record's own slot. Had it claimed a fresh one, the stale
+     * record would still be standing and the same path would be counted both
+     * loaded and failed. */
+    mye_asset_stats loaded = mye_asset_stats_get(world);
+    ASSERT_EQ_INT(0, (int)loaded.assets_failed);
+    ASSERT_EQ_INT(1, (int)loaded.textures_live);
+
+    mye_texture_release(world, now);
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+}
+
+/* --- the shutdown report -------------------------------------------------- */
+
+/* plan/06-assets.md promises debug builds report any handle still live at
+ * shutdown with the path that loaded it. One warning per asset, so the count
+ * is what a test can hold on to; the key is in the message. */
+TEST(shutdown_reports_every_asset_still_live)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    char first[600];
+    char second[600];
+    make_path("held_a.png", first, sizeof first);
+    make_path("held_b.png", second, sizeof second);
+    ASSERT_TRUE(write_test_png(first, 8, 8, RED));
+    ASSERT_TRUE(write_test_png(second, 8, 8, BLUE));
+
+    ASSERT_TRUE(mye_texture_valid(world, mye_texture_load(world, first)));
+    ASSERT_TRUE(mye_texture_valid(world, mye_texture_load(world, second)));
+
+    mye_log_counts before = mye_log_get_counts();
+    ASSERT_EQ_INT(0, mye_shutdown(world)); /* a report, not an error */
+    ASSERT_EQ_U64(before.warn + 2, mye_log_get_counts().warn);
+}
+
+TEST(shutdown_says_nothing_when_everything_was_released)
+{
+    ecs_world_t *world = make_world();
+    ASSERT_TRUE(world != NULL);
+
+    char path[600];
+    make_path("released.png", path, sizeof path);
+    ASSERT_TRUE(write_test_png(path, 8, 8, GREEN));
+
+    mye_texture tex = mye_texture_load(world, path);
+    ASSERT_TRUE(mye_texture_valid(world, tex));
+    mye_texture_release(world, tex);
+
+    mye_log_counts before = mye_log_get_counts();
+    ASSERT_EQ_INT(0, mye_shutdown(world));
+    ASSERT_EQ_U64(before.warn, mye_log_get_counts().warn);
+}
+
 TEST_MAIN(TEST_CASE(a_loaded_texture_is_valid_and_resolvable),
           TEST_CASE(loading_the_same_path_twice_shares_one_slot),
           TEST_CASE(a_missing_file_fails_without_a_valid_handle),
           TEST_CASE(a_stale_handle_does_not_resolve_to_the_next_tenant),
-          TEST_CASE(a_generated_texture_needs_no_file))
+          TEST_CASE(a_generated_texture_needs_no_file),
+          TEST_CASE(a_font_is_keyed_by_path_and_size),
+          TEST_CASE(a_missing_font_leaves_a_failure_record),
+          TEST_CASE(a_failure_record_becomes_the_asset_when_the_file_appears),
+          TEST_CASE(shutdown_reports_every_asset_still_live),
+          TEST_CASE(shutdown_says_nothing_when_everything_was_released))

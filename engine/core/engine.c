@@ -10,6 +10,7 @@
 #include "render/canvas.h"
 #include "render/render2d.h"
 #include "render/render3d.h"
+#include "render/text.h"
 #include "scene/scene.h"
 #include "scene/serialize.h"
 #include "scene/transform.h"
@@ -315,6 +316,10 @@ ecs_world_t *mye_init(const mye_config *config)
      * earlier. */
     ECS_IMPORT(world, MyeCameraModule);
     ECS_IMPORT(world, MyeCanvasModule);
+    /* After render2d: its draw system must be registered first, so flecs
+     * orders it ahead of the world-space text pass within MyeOnDraw2D and
+     * text composites over the sprites (see render/text.h). */
+    ECS_IMPORT(world, MyeTextModule);
     ECS_IMPORT(world, MyeDebugOverlayModule);
 
     return world;

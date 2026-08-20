@@ -60,6 +60,7 @@ PREAMBLE = """\
 #include "render/canvas.h"
 #include "render/render2d.h"
 #include "render/render3d.h"
+#include "render/text.h"
 #include "scene/scene.h"
 #include "scene/serialize.h"
 #include "scene/transform.h"
