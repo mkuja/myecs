@@ -645,16 +645,21 @@ static void DespawnFinished(ecs_iter_t *it)
 }
 ```
 
-Add `MyeHidden` to skip an entity when drawing without deleting it.
+Add `MyeHidden` to skip an entity when drawing without deleting it, and
+`MyeVisibilityLayers` to say which cameras may draw it: a camera draws an
+entity when its own `layers` mask shares a bit with the entity's. An entity
+without the component is on every layer, so this is opt-in at both ends and
+nothing you already have changes.
 
 ### The 2D camera
 
-Sprites are drawn in **world** space, inside raylib's `BeginMode2D`. Which
-camera that uses is an entity with `MyeCamera2D`. With one camera that is
-all there is to it. With several — a main view and a minimap — name the main
-one in `MyeRenderConfig.camera`; the others are yours to draw with. With none,
-the pass falls back to an identity view, so a game without a camera still
-draws.
+Sprites are drawn in **world** space, through every active `MyeCamera2D`, in
+`order`, each into its own `viewport` — a zero-sized rect meaning the whole
+window. With one camera that is all there is to it, and it is the whole
+window. With several — a main view and a minimap, or two halves of a split
+screen — each is an ordinary camera entity and there is nothing to nominate:
+the engine draws all of them. With none, the pass falls back to an identity
+view, so a game without a camera still draws.
 
 A camera is an ordinary entity in the transform hierarchy: **where it is comes
 from its position**, and the component only says what a camera *is* — zoom,

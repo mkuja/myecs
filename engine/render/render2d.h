@@ -89,6 +89,29 @@ typedef struct MyeHidden {
     char unused;
 } MyeHidden;
 
+/* Which visibility layers this entity is on. A camera draws it when any bit
+ * matches the camera's own `layers` -- so a minimap on layer 2 can show blips
+ * that the main view, on layer 1, does not.
+ *
+ * Optional, and its absence is generous: an entity WITHOUT this component is
+ * on MYE_LAYERS_ALL, so every camera draws it. Nothing that exists has to be
+ * labelled, and adding a masked camera cannot silently empty the screen --
+ * which is the failure mode of the opposite default.
+ *
+ * The consequence, said plainly because it is the one that surprises: to show
+ * blips and NOT the world through a masked camera, the world needs a mask
+ * too. Layers are a labelling scheme, and the engine labels nothing for you.
+ *
+ * Shared by both renderers, like MyeHidden. The camera half of the rule is
+ * `layers` on MyeCamera2D/MyeCamera3D; mye_camera_sees (render/camera.h)
+ * states it in one place. */
+typedef struct MyeVisibilityLayers {
+    uint32_t mask;
+} MyeVisibilityLayers;
+
+/* On every layer: what an entity with no MyeVisibilityLayers counts as. */
+#define MYE_LAYERS_ALL 0xFFFFFFFFu
+
 /* Marks an entity as a 2D camera. Its position comes from the entity's
  * transform, so it can be parented or driven by MyeCameraFollow -- see
  * render/camera.h. The first one marked active is the one that draws. */
@@ -102,6 +125,11 @@ typedef struct MyeCamera2D {
      * order draws later. */
     Rectangle viewport;
     int order;
+
+    /* Bitmask intersected with each entity's MyeVisibilityLayers: the entity
+     * is drawn when any bit matches. 0 -- the default, and what every camera
+     * that predates this field has -- sees every layer. */
+    uint32_t layers;
 
     /* Which canvas this camera renders into: a MyeCanvas entity, or 0 for
      * the window. See render/canvas.h. */
@@ -120,6 +148,7 @@ extern ECS_COMPONENT_DECLARE(MyeSprite);
 extern ECS_COMPONENT_DECLARE(MyeSpriteAnim);
 extern ECS_COMPONENT_DECLARE(MyeInterpolate);
 extern ECS_COMPONENT_DECLARE(MyeHidden);
+extern ECS_COMPONENT_DECLARE(MyeVisibilityLayers);
 extern ECS_COMPONENT_DECLARE(MyeCamera2D);
 extern ECS_COMPONENT_DECLARE(MyeRenderConfig);
 
