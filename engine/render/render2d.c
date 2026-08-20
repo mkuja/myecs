@@ -32,24 +32,17 @@ static const MyeRender2dState *render_state(const ecs_world_t *world)
     return ecs_singleton_get(world, MyeRender2dState);
 }
 
-/* One entry per visible sprite, built fresh each frame in the frame arena. */
-typedef struct draw_item {
-    const Texture2D *texture;
-    Rectangle source;
-    Rectangle dest;
-    Vector2 origin;
-    float rotation_degrees;
-    Color tint;
-    int32_t layer;
-} draw_item;
-
-/* Back-to-front: layer first, then y so entities lower on screen overlap
+/* One entry per visible sprite, built fresh each frame in the frame arena.
+ * MyeDrawItem is declared in render2d.h as a testing seam -- see the comment
+ * there.
+ *
+ * Back-to-front: layer first, then y so entities lower on screen overlap
  * those above them (the usual top-down depth illusion), then texture so
  * raylib can batch identical textures into one draw call. */
-static int compare_draw_items(const void *lhs, const void *rhs)
+int mye_draw_item_compare(const void *lhs, const void *rhs)
 {
-    const draw_item *a = (const draw_item *)lhs;
-    const draw_item *b = (const draw_item *)rhs;
+    const MyeDrawItem *a = (const MyeDrawItem *)lhs;
+    const MyeDrawItem *b = (const MyeDrawItem *)rhs;
 
     if (a->layer != b->layer) {
         return a->layer < b->layer ? -1 : 1;
@@ -102,7 +95,7 @@ void mye_render2d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
         return;
     }
 
-    draw_item *items = MYE_NEW_ARRAY(frame, draw_item, (size_t)total);
+    MyeDrawItem *items = MYE_NEW_ARRAY(frame, MyeDrawItem, (size_t)total);
     if (items == NULL) {
         /* Frame arena exhausted: skip the pass rather than draw garbage.
          * Raising mye_config.frame_arena_bytes is the fix. */
@@ -168,7 +161,7 @@ void mye_render2d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
                          (positions[i].y - interp[i].prev_y) * alpha;
             }
 
-            items[count++] = (draw_item){
+            items[count++] = (MyeDrawItem){
                 .texture = texture,
                 .source = source,
                 /* Absolute: a negative source width or height means
@@ -186,7 +179,7 @@ void mye_render2d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
         }
     }
 
-    qsort(items, (size_t)count, sizeof *items, compare_draw_items);
+    qsort(items, (size_t)count, sizeof *items, mye_draw_item_compare);
 
     /* Every active camera draws the same sorted list, each into its own
      * viewport, in order. The list is built once: sorting it per camera
