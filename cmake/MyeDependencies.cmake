@@ -63,6 +63,13 @@ FetchContent_Declare(flecs
     # top of this file.
     FIND_PACKAGE_ARGS 4.1.6 EXACT CONFIG)
 
+# The REST and STATS addons are debug tooling: REST is the HTTP server the
+# flecs Explorer connects to, STATS is the per-system timing the debug overlay
+# profiles with. Neither belongs in a shipped game, so Release compiles them
+# OUT rather than merely leaving them unstarted. See plan/08-build.md. The
+# switch itself is further down, after FetchContent_MakeAvailable: the flecs
+# targets do not exist before that point.
+
 # -------------------------------------------------------- libwebsockets ----
 # Native only: a web build gets its WebSocket from the browser, so shipping a
 # protocol implementation into the wasm would be dead weight. See
@@ -120,6 +127,24 @@ if(NOT EMSCRIPTEN)
 endif()
 
 set(CMAKE_SKIP_INSTALL_RULES ${_mye_skip_install_backup})
+
+# flecs selects its addons with preprocessor macros, not CMake options: it has
+# no FLECS_REST/FLECS_STATS build flag, so the only lever is a blacklist macro
+# (FLECS_NO_<addon>) read by include/flecs/private/addons.h.
+#
+# PUBLIC is not optional here. The macros change what flecs.h *declares*, so
+# the library and everything that includes it must agree; defining them PRIVATE
+# would compile a flecs without the REST addon while the engine still believed
+# `EcsRest` existed, and the mismatch would only surface at link time.
+#
+# The $<CONFIG:Debug> generator expression is evaluated per configuration, so
+# this works with single-config generators (Makefiles, Ninja) as well as
+# multi-config ones -- the whole target is compiled once per configuration
+# either way, so flecs and our own code always see the same definitions. No
+# configure-time `if(CMAKE_BUILD_TYPE STREQUAL ...)` is needed, and using one
+# would quietly break Ninja Multi-Config.
+target_compile_definitions(flecs_static PUBLIC
+    $<$<NOT:$<CONFIG:Debug>>:FLECS_NO_REST;FLECS_NO_STATS>)
 
 # Route raylib's allocations through mye_alloc. The macros are #ifndef-guarded
 # in raylib.h, rlgl.h and raudio.c, so defining them here wins; -include makes
