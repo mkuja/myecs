@@ -17,8 +17,8 @@ C.
 | [3. Phases: when things run](#3-phases-when-things-run) | [11. Scenes](#11-scenes) | [19. The debug overlay and the flecs Explorer](#19-the-debug-overlay-and-the-flecs-explorer) |
 | [4. The fixed timestep](#4-the-fixed-timestep) | [12. Input actions](#12-input-actions) | [20. Testing what you wrote](#20-testing-what-you-wrote) |
 | [5. Render interpolation (opt-in)](#5-render-interpolation-opt-in) | [13. Audio](#13-audio) | [21. The web target](#21-the-web-target) |
-| [6. Allocators](#6-allocators) | [14. 3D rendering](#14-3d-rendering) | [22. Capstone: Orbit Collector](#22-capstone-orbit-collector) |
-| [7. Assets and handles](#7-assets-and-handles) | [15. Skeletal animation](#15-skeletal-animation) |  |
+| [6. Allocators](#6-allocators) | [14. 3D rendering](#14-3d-rendering) | [22. Collision and events](#22-collision-and-events) |
+| [7. Assets and handles](#7-assets-and-handles) | [15. Skeletal animation](#15-skeletal-animation) | [23. Capstone: Orbit Collector](#23-capstone-orbit-collector) |
 
 ---
 
@@ -1890,9 +1890,131 @@ single-threaded.
 
 ---
 
-## 22. Capstone: Orbit Collector
+## 22. Collision and events
 
-Every feature above, in one game.
+**What it is.** Two components and one event. `MyeVelocity2D` moves an entity
+once per fixed step; `MyeCollider2D` gives it a circle or a box; and every
+overlapping pair produces one `MyeCollision2D` event, delivered to any observer
+that asks for it. All three are opt-in — an entity without them is never
+touched.
+
+**Why it is.** The engine finds overlaps and **resolves nothing**. No impulses,
+no pushing apart, no bouncing. What a collision *means* — destroy the bullet,
+lose a life, open the door — is a game decision, and an engine that made it for
+you would be a physics engine you cannot turn off. `MyeOverlap` hands you a
+normal and a depth so you can separate things yourself if that is what you
+want.
+
+**Layers.** `layers` is what a collider *is*; `mask` is what it wants to be
+*told about*. A pair is tested when either side is interested in the other, so
+you only set the relationship up from one end — and the pair still fires
+exactly one event. A collider with both at zero can never collide, and the
+engine says so in the log rather than staying quiet.
+
+```c
+/* collide.c -- opt in to collision, then listen for it. Headless. */
+#include "collision/collision.h"
+#include "core/engine.h"
+
+#include <stdio.h>
+
+#define LAYER_SHIP MYE_LAYER(0)
+#define LAYER_ROCK MYE_LAYER(1)
+
+static void OnCollision(ecs_iter_t *it)
+{
+    const MyeCollision2D *hit = it->param;
+
+    /* Both ends of the pair are named. Which one is `self` is decided by
+     * entity id, not by who moved -- so test for the component you care
+     * about rather than assuming an order. */
+    printf("overlap of %.2f between %llu and %llu\n",
+           (double)hit->overlap.depth, (unsigned long long)hit->self,
+           (unsigned long long)hit->other);
+}
+
+int main(void)
+{
+    ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
+    if (world == NULL) return 1;
+
+    /* "Tell me about any collision, to anything." */
+    ecs_observer(world, {
+        .query.terms = {{ .id = ecs_id(MyeCollider2D), .inout = EcsIn }},
+        .events = { ecs_id(MyeCollision2D) },
+        .callback = OnCollision,
+    });
+
+    ecs_entity_t ship = mye_entity_new(world);
+    ecs_set(world, ship, MyePosition2D, { 0.0f, 0.0f });
+    ecs_set(world, ship, MyeCollider2D,
+            { .shape = MYE_COLLIDER_CIRCLE, .radius = 12.0f,
+              .layers = LAYER_SHIP, .mask = LAYER_ROCK });
+
+    ecs_entity_t rock = mye_entity_new(world);
+    ecs_set(world, rock, MyePosition2D, { 300.0f, 0.0f });
+    ecs_set(world, rock, MyeVelocity2D, { -240.0f, 0.0f }); /* closes in */
+    ecs_set(world, rock, MyeCollider2D,
+            /* The rock asks about nothing; the ship asking is enough. */
+            { .shape = MYE_COLLIDER_CIRCLE, .radius = 20.0f,
+              .layers = LAYER_ROCK, .mask = MYE_LAYER_NONE });
+
+    for (int i = 0; i < 70; ++i) mye_progress(world, 1.0f / 60.0f);
+    return mye_shutdown(world);
+}
+```
+
+The fixed step runs in this order, and it matters: interpolation records where
+everything was, velocities move it, then collision reports what now overlaps.
+A collision is therefore always about *this* step's positions.
+
+Two more things worth knowing. The pair test is O(n²) with no broadphase — fine
+for the hundreds of colliders a game like this has, and the moment to add a
+grid is when a profile says so, not before. And a collider in a transform
+hierarchy is placed by its **world** position, so a turret parented to a tank
+collides where it is drawn, not at the origin.
+
+**Events are not just for collisions.** The same mechanism carries anything
+your game wants to announce. A component type is the event; its value is the
+payload.
+
+```c file
+typedef struct Damage { int amount; } Damage;
+ECS_COMPONENT_DECLARE(Damage);   /* ...and ECS_COMPONENT_DEFINE at setup */
+
+static void OnDamage(ecs_iter_t *it)
+{
+    const Damage *d = it->param;
+    mye_log_info("took %d", d->amount);
+}
+
+static void watch_and_hurt(ecs_world_t *world, ecs_entity_t hero)
+{
+    /* An observer scoped to one entity: EcsAny means "not about any
+     * particular component, about this entity". */
+    ecs_observer(world, {
+        .query.terms = {{ .id = EcsAny, .src.id = hero }},
+        .events = { ecs_id(Damage) },
+        .callback = OnDamage,
+    });
+
+    mye_event_emit(world, hero, ecs_id(Damage), 0, &(Damage){ 7 });
+}
+```
+
+Observers run synchronously, so the payload can live on the stack, and an
+`ecs_delete` from inside one is deferred to the end of the step exactly as it
+would be from a system.
+
+Rule of thumb: **collide in `MyeOnFixedUpdate`, decide in the observer, and
+never expect the engine to move anything apart for you.**
+
+---
+
+## 23. Capstone: Orbit Collector
+
+Nearly every feature above, in one game. It predates the collision module and
+still does its own overlap test, which is what §22 replaces.
 
 **Play:** WASD or arrows to move. Collect the green orbs, avoid the red mines.
 ENTER starts and restarts, F3 shows the overlay.

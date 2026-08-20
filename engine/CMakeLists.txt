@@ -5,6 +5,7 @@ add_library(engine STATIC
     core/log.c
     debug/overlay.c
     core/engine.c
+    collision/collision.c
     input/input.c
     asset/asset.c
     audio/audio.c

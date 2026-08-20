@@ -121,6 +121,7 @@ rendering. Use it rather than `ecs_progress`.
 | `engine/render/render3d` | meshes, directional lights, Blinn-Phong and PBR |
 | `engine/render/camera` | cameras in the transform hierarchy, following, screen/world |
 | `engine/render/canvas` | off-screen render targets cameras draw into, usable as textures |
+| `engine/collision` | circle/AABB overlap tests, collision events, velocity — detects, never resolves |
 | `engine/scene/transform` | parent-child hierarchy shared by 2D and 3D |
 | `engine/scene/scene` | load, unload, switch; scene-owned entities and assets |
 | `engine/scene/serialize` | world and scene state to and from JSON |

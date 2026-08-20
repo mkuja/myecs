@@ -6,6 +6,7 @@
 
 #include "asset/asset.h"
 #include "audio/audio.h"
+#include "collision/collision.h"
 #include "input/input.h"
 #include "render/camera.h"
 #include "render/canvas.h"
@@ -321,6 +322,11 @@ ecs_world_t *mye_init(const mye_config *config)
      * orders it ahead of the world-space text pass within MyeOnDraw2D and
      * text composites over the sprites (see render/text.h). */
     ECS_IMPORT(world, MyeTextModule);
+    /* After render2d, and that is load-bearing: systems inside
+     * MyeOnFixedUpdate run in creation order, and velocity integration must
+     * follow render2d's MyeCapturePrevPositions or interpolation blends every
+     * moving entity against its own post-move position. See collision.h. */
+    ECS_IMPORT(world, MyeCollisionModule);
     ECS_IMPORT(world, MyeDebugOverlayModule);
 
     return world;
@@ -454,6 +460,32 @@ ecs_entity_t mye_entity_new(ecs_world_t *world)
         ecs_add_pair(world, e, mye_scene_relationship(), owner);
     }
     return e;
+}
+
+void mye_event_emit(ecs_world_t *world, ecs_entity_t entity,
+                    ecs_entity_t event, ecs_id_t id, const void *payload)
+{
+    /* Refuse quietly rather than tripping flecs' assert: gameplay code emits
+     * at whatever it just touched, which may be an entity a previous observer
+     * has already deleted. */
+    if (world == NULL || entity == 0 || event == 0 ||
+        !ecs_is_alive(world, entity)) {
+        return;
+    }
+
+    /* No ids given means the entity event form, which flecs represents as
+     * EcsAny -- it fills that in itself, so leaving `ids` NULL is the
+     * documented way to ask for it, not an omission. */
+    ecs_type_t type = { .array = &id, .count = 1 };
+
+    ecs_emit(world, &(ecs_event_desc_t){
+                        .event = event,
+                        .entity = entity,
+                        .ids = id != 0 ? &type : NULL,
+                        /* const_param, so flecs cannot hand an observer a
+                         * writable pointer into the caller's stack value. */
+                        .const_param = payload,
+                    });
 }
 
 mye_engine *mye_engine_get(const ecs_world_t *world)
