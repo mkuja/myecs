@@ -394,11 +394,13 @@ TEST(a_long_game_run_stays_within_a_bounded_high_water_mark)
         }
         step_with(world, actions, n);
 
-        /* Keep playing after a game over, so restart is part of the soak. */
+        /* Keep playing after a game over, so the fresh-start path is part of
+         * the soak. This test drives the library without the scene layer, so
+         * it calls asteroids_start directly -- the same function the play
+         * scene's load callback calls. */
         const GameState *s = ecs_singleton_get(world, GameState);
         if (s != NULL && s->game_over) {
-            const int restart[] = { ACT_RESTART };
-            step_with(world, restart, 1);
+            asteroids_start(world);
         }
     }
 
