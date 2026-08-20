@@ -10,6 +10,10 @@ ECS_COMPONENT_DECLARE(MyeAssets);
 #define MYE_MAX_TEXTURES 256
 #define MYE_MAX_SOUNDS 128
 #define MYE_MAX_MODELS 128
+/* Far fewer than sounds, deliberately: a game has a menu theme, a level
+ * theme and a boss theme, not a hundred. Each slot holds an open decoder and
+ * a device buffer, so the cheap thing to be generous with is sfx. */
+#define MYE_MAX_MUSIC 16
 #define MYE_ASSET_KEY_MAX 128
 
 typedef enum asset_state {
@@ -52,12 +56,27 @@ typedef struct sound_slot {
     Sound sound;
 } sound_slot;
 
+typedef struct music_slot {
+    uint32_t generation;
+    asset_state state;
+    uint32_t refcount;
+    uint32_t scope; /* which scene loaded it; 0 = unscoped */
+    char key[MYE_ASSET_KEY_MAX];
+    /* Zeroed when there is no audio device: the slot exists so the registry
+     * behaves the same, but nothing is streaming. */
+    Music music;
+    /* Whether raylib allocated the decoder context and forgot to free it --
+     * see unload_music_fully. */
+    bool wav_ctx;
+} music_slot;
+
 struct mye_asset_db {
     mye_allocator allocator;
 
     texture_slot *textures;
     sound_slot *sounds;
     model_slot *models;
+    music_slot *music;
 
     Texture2D placeholder;
     bool placeholder_ready;
@@ -726,6 +745,145 @@ void mye_sound_release(ecs_world_t *world, mye_sound handle)
     ++slot->generation;
 }
 
+/* ----------------------------------------------------------------- music -- */
+
+/* raylib 6.0's UnloadMusicStream uninits the decoder context but frees only
+ * some of them: the MP3 and MOD branches end in RL_FREE(music.ctxData), the
+ * WAV branch does not (raudio.c ~1773). LoadMusicStream RL_CALLOCs a drwav
+ * for every .wav it opens, so every WAV track leaks that struct -- invisible
+ * without a tracking allocator, which is how this surfaced, and the same
+ * oversight unload_model_fully works around above. OGG, FLAC and QOA free
+ * their own contexts and must be left alone.
+ *
+ * Which decoder a track uses lives in a private enum in raudio.c, so the slot
+ * remembers whether the file was a WAV instead. That is not a guess: raylib
+ * picks the decoder by extension and nothing else, and the flag is set with
+ * raylib's own IsFileExtension, so it agrees with the dispatch by
+ * construction rather than by luck.
+ *
+ * mye_rl_free, not RL_FREE: raylib.h is included before core/rl_alloc.h in
+ * this file, so the RL_FREE macro is raylib's plain free() and would be
+ * handed a pointer our header-prefixed allocator produced.
+ *
+ * ON A RAYLIB UPGRADE: check whether raudio.c's WAV branch grew an RL_FREE.
+ * Once it has, this free becomes a double free and must go. */
+static void unload_music_fully(Music *music, bool wav_ctx)
+{
+    void *ctx = music->ctxData;
+    UnloadMusicStream(*music);
+    if (wav_ctx && ctx != NULL) {
+        mye_rl_free(ctx);
+    }
+    *music = (Music){ 0 };
+}
+
+static music_slot *resolve_music(const mye_asset_db *db, mye_music handle)
+{
+    if (db == NULL || handle.generation == 0 ||
+        handle.index >= MYE_MAX_MUSIC) {
+        return NULL;
+    }
+    music_slot *slot = &db->music[handle.index];
+    if (slot->state != ASSET_LOADED || slot->generation != handle.generation) {
+        return NULL; /* stale handle: the slot was reused or freed */
+    }
+    return slot;
+}
+
+mye_music mye_music_load(ecs_world_t *world, const char *path)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || path == NULL) {
+        return (mye_music){ 0 };
+    }
+
+    char key[MYE_ASSET_KEY_MAX];
+    copy_key(key, path);
+
+    for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
+        if (db->music[i].state == ASSET_LOADED &&
+            strcmp(db->music[i].key, key) == 0) {
+            ++db->music[i].refcount; /* dedupe: one decoder, one stream */
+            return (mye_music){ .index = (uint32_t)i,
+                                .generation = db->music[i].generation };
+        }
+    }
+
+    int index = -1;
+    for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
+        if (db->music[i].state == ASSET_EMPTY) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0) {
+        return (mye_music){ 0 };
+    }
+
+    Music music = { 0 };
+    if (db->audio_ready) {
+        music = LoadMusicStream(path);
+        if (!IsMusicValid(music)) {
+            /* Missing file, or a format this raylib was not built with. The
+             * failed load already freed whatever it had opened. */
+            return (mye_music){ 0 };
+        }
+        /* raylib turns looping ON in every loader. The engine does not loop
+         * behind the user's back, so it is turned off here and only the
+         * audio module's explicit `loop` flag ever turns it back on. */
+        music.looping = false;
+    } else if (!FileExists(path)) {
+        /* Headless still refuses a path that is not there: a typo must fail
+         * in the silent test run, not only in the build with a sound card. */
+        return (mye_music){ 0 };
+    }
+
+    music_slot *slot = &db->music[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_LOADED;
+    slot->refcount = 1;
+    slot->scope = db->scope;
+    slot->music = music;
+    slot->wav_ctx = IsFileExtension(path, ".wav");
+    copy_key(slot->key, key);
+
+    return (mye_music){ .index = (uint32_t)index,
+                        .generation = slot->generation };
+}
+
+const Music *mye_music_get(const ecs_world_t *world, mye_music handle)
+{
+    const music_slot *slot = resolve_music(db_get(world), handle);
+    return slot != NULL ? &slot->music : NULL;
+}
+
+bool mye_music_valid(const ecs_world_t *world, mye_music handle)
+{
+    return resolve_music(db_get(world), handle) != NULL;
+}
+
+void mye_music_release(ecs_world_t *world, mye_music handle)
+{
+    mye_asset_db *db = db_get(world);
+    music_slot *slot = resolve_music(db, handle);
+    if (slot == NULL || --slot->refcount > 0) {
+        return;
+    }
+    if (db->audio_ready) {
+        /* Stops the stream first, so releasing a track that is still playing
+         * is safe. The audio module notices the handle stopped resolving on
+         * its next pump and drops its own bookkeeping. */
+        unload_music_fully(&slot->music, slot->wav_ctx);
+    }
+    slot->state = ASSET_EMPTY;
+    slot->key[0] = '\0';
+    slot->music = (Music){ 0 };
+    slot->wav_ctx = false;
+    ++slot->generation;
+}
+
 /* ---------------------------------------------------------------- scopes -- */
 
 void mye_assets_set_scope(ecs_world_t *world, uint32_t scope)
@@ -778,6 +936,15 @@ void mye_assets_release_scope(ecs_world_t *world, uint32_t scope)
                                                db->models[i].generation });
         }
     }
+    for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
+        if (db->music[i].state == ASSET_LOADED &&
+            db->music[i].scope == scope) {
+            mye_music_release(world,
+                              (mye_music){ .index = (uint32_t)i,
+                                           .generation =
+                                               db->music[i].generation });
+        }
+    }
 }
 
 /* ----------------------------------------------------------------- stats -- */
@@ -798,6 +965,9 @@ mye_asset_stats mye_asset_stats_get(const ecs_world_t *world)
     }
     for (int i = 0; i < MYE_MAX_MODELS; ++i) {
         if (db->models[i].state == ASSET_LOADED) ++stats.models_live;
+    }
+    for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
+        if (db->music[i].state == ASSET_LOADED) ++stats.music_live;
     }
     stats.textures_loaded_total = db->textures_loaded_total;
     return stats;
@@ -826,6 +996,13 @@ static void assets_fini(ecs_world_t *world, void *ctx)
             UnloadSound(db->sounds[i].sound);
         }
     }
+    /* Before CloseAudioDevice below, like sounds: each stream holds an open
+     * decoder and a device buffer. */
+    for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
+        if (db->music[i].state == ASSET_LOADED && db->audio_ready) {
+            unload_music_fully(&db->music[i].music, db->music[i].wav_ctx);
+        }
+    }
     for (int i = 0; i < MYE_MAX_MODELS; ++i) {
         if (db->models[i].state == ASSET_LOADED && !db->headless) {
             if (db->models[i].animations != NULL) {
@@ -848,6 +1025,7 @@ static void assets_fini(ecs_world_t *world, void *ctx)
     MYE_DELETE_ARRAY(a, db->textures, MYE_MAX_TEXTURES);
     MYE_DELETE_ARRAY(a, db->sounds, MYE_MAX_SOUNDS);
     MYE_DELETE_ARRAY(a, db->models, MYE_MAX_MODELS);
+    MYE_DELETE_ARRAY(a, db->music, MYE_MAX_MUSIC);
     MYE_DELETE(a, db);
 }
 
@@ -869,10 +1047,13 @@ void MyeAssetsModuleImport(ecs_world_t *world)
     db->textures = MYE_NEW_ARRAY(a, texture_slot, MYE_MAX_TEXTURES);
     db->sounds = MYE_NEW_ARRAY(a, sound_slot, MYE_MAX_SOUNDS);
     db->models = MYE_NEW_ARRAY(a, model_slot, MYE_MAX_MODELS);
-    if (db->textures == NULL || db->sounds == NULL || db->models == NULL) {
+    db->music = MYE_NEW_ARRAY(a, music_slot, MYE_MAX_MUSIC);
+    if (db->textures == NULL || db->sounds == NULL || db->models == NULL ||
+        db->music == NULL) {
         MYE_DELETE_ARRAY(a, db->textures, MYE_MAX_TEXTURES);
         MYE_DELETE_ARRAY(a, db->sounds, MYE_MAX_SOUNDS);
         MYE_DELETE_ARRAY(a, db->models, MYE_MAX_MODELS);
+        MYE_DELETE_ARRAY(a, db->music, MYE_MAX_MUSIC);
         MYE_DELETE(a, db);
         ecs_singleton_set(world, MyeAssets, { .db = NULL });
         return;

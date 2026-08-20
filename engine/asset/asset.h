@@ -30,6 +30,11 @@ typedef struct mye_sound {
     uint32_t generation;
 } mye_sound;
 
+typedef struct mye_music {
+    uint32_t index;
+    uint32_t generation;
+} mye_music;
+
 typedef struct mye_model {
     uint32_t index;
     uint32_t generation;
@@ -131,6 +136,27 @@ const Sound *mye_sound_get(const ecs_world_t *world, mye_sound handle);
 void mye_sound_release(ecs_world_t *world, mye_sound handle);
 bool mye_sound_valid(const ecs_world_t *world, mye_sound handle);
 
+/* ----------------------------------------------------------------- music -- */
+
+/* A streaming track: decoded a buffer at a time while it plays, rather than
+ * held in memory whole like a sound. Deduped by path and refcounted like the
+ * rest; playback lives in audio/audio.h.
+ *
+ * Whatever raylib can stream is accepted -- OGG and WAV in practice, and the
+ * extension is never inspected here: raylib sniffs the file, and gating on
+ * ".ogg" would only teach the engine a shorter list of formats than the
+ * decoder actually has.
+ *
+ * Headless (or with no audio device) the slot is recorded without a stream,
+ * so scene bookkeeping and the playback state machine stay testable without
+ * a sound card. The file still has to exist: a typo is a bug whether or not
+ * anyone can hear it. mye_music_get then hands back a zeroed Music, which
+ * every raylib music call ignores. */
+mye_music mye_music_load(ecs_world_t *world, const char *path);
+const Music *mye_music_get(const ecs_world_t *world, mye_music handle);
+void mye_music_release(ecs_world_t *world, mye_music handle);
+bool mye_music_valid(const ecs_world_t *world, mye_music handle);
+
 /* ---------------------------------------------------------------- scopes -- */
 
 /* Assets remember which scope loaded them, so a scene can release everything
@@ -148,6 +174,7 @@ typedef struct mye_asset_stats {
     uint32_t textures_live;
     uint32_t sounds_live;
     uint32_t models_live;
+    uint32_t music_live;
     uint32_t textures_loaded_total;
 } mye_asset_stats;
 
