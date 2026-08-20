@@ -68,9 +68,12 @@ changes made inside systems are deferred per-thread and merged at sync points
 ## 2. Background jobs — a small worker pool
 
 For asset I/O (M4) a full job system is overkill. Design: **one internal
-worker pool** (N = cores−1, min 1) built on **C11 `<threads.h>`**
-(`thrd_create`, `mtx_t`, `cnd_t`; glibc has supported this since 2.28 —
-fallback shim to pthreads only if another platform ever needs it).
+worker pool** (N = cores−1, min 1) behind `engine/core/thread.h`. The
+original plan said C11 `<threads.h>` with a pthreads fallback; the shipped
+arrangement is the inverse -- **pthreads on POSIX, C11 threads elsewhere** --
+because TSan cannot instrument glibc's `<threads.h>` (DEADLYSIGNAL under gcc
+and clang both), and a thread layer the sanitizer cannot see is worse than a
+wrapper.
 
 ```c
 typedef void (*mye_job_fn)(void *arg);
@@ -83,19 +86,22 @@ not thread-safe from outside `ecs_progress`) and never call raylib GPU/window
 functions. If later demos need a parallel-for over raw arrays, extend this
 pool — but flecs already covers the common case.
 
-## 3. Channels — Concurrency Kit
+## 3. Channels
 
-For thread↔thread messaging we use **Concurrency Kit**
-(`ck`, pure C, BSD license, in Arch/Debian repos and buildable via
-FetchContent): specifically **`ck_ring`**, a fixed-size lock-free ring buffer
-with SPSC/MPSC/SPMC/MPMC operation modes.
+For thread↔thread messaging: `engine/core/channel.h`, a **mutex-protected
+ring buffer**. Concurrency Kit's `ck_ring` was the original candidate here
+and was never adopted -- the primitive policy above decided it: a handful of
+messages per frame is not a hot spot, and the channel is multi-producer with
+messages that must not be lost, which is exactly the "mutex by default" case.
+No third-party dependency was added.
 
-Wrapped in `engine/core/channel.h` so call sites stay simple and the backing
-library is swappable:
+The real signatures (the allocator comes first, like every allocating engine
+interface):
 
 ```c
-typedef struct mye_channel mye_channel;          // fixed capacity, pow2
-mye_channel *mye_channel_create(size_t capacity, size_t elem_size);
+typedef struct mye_channel mye_channel;          // fixed capacity
+mye_channel *mye_channel_create(mye_allocator a, size_t capacity,
+                                size_t elem_size);
 bool mye_channel_send(mye_channel *c, const void *msg);   // false = full
 bool mye_channel_recv(mye_channel *c, void *out);         // false = empty
 ```
@@ -106,8 +112,13 @@ blocks the frame.
 
 **The shape it was designed for** (this pipeline was built, then removed --
 assets load at scene boundaries now; see [06-assets.md](06-assets.md). It is
-kept here because it is the pattern the channel exists for, and the WebSocket
-transport in [12-networking.md](12-networking.md) uses the same one):
+kept here because it is the pattern the channel exists for. Be aware of the
+consequence: with asset workers gone, **nothing in the engine consumes
+`mye_channel` or `mye_jobs` today** -- the WebSocket transport is
+deliberately single-threaded and pump-per-frame, not channel-fed. They are
+the documented pattern for a game's own threads (TUTORIAL §17), kept tested;
+whether they stay is an open decision recorded in
+[15-gaps.md](15-gaps.md)):
 
 ```text
 main thread                          worker pool

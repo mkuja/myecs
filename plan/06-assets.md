@@ -46,7 +46,7 @@ state: EMPTY → LOADING → LOADED → FAILED
 
 ## Scene integration
 
-Scenes own their assets: `mye_scene_load` records every handle acquired
+Scenes own their assets: a scene load (`mye_scene_switch`) records every handle acquired
 during scene setup (a per-scene handle list in the scene arena); scene unload
 releases them all. Shared assets survive via refcount if another scene also
 holds them. Debug builds report any handle still live at shutdown with the
@@ -72,7 +72,8 @@ path that loaded it.
 
 ## Paths & formats
 
-- Asset root: `assets/` next to the executable (raylib `SearchAndSetResourceDir`
+- Asset root: `assets/` at the project root, resolved by `mye_asset_path()`
+  (walks up from cwd/exe; replaced the planned `SearchAndSetResourceDir`
   pattern); paths are engine-relative, forward slashes.
 - Formats (all raylib-native, no extra deps): PNG for textures/atlases,
   glTF (.glb) + OBJ for models, WAV (sfx) + OGG (music), TTF for fonts.

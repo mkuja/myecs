@@ -36,9 +36,9 @@ ECS_COMPONENT_DECLARE(MyeApp);
  * hook shape demands it -- engine code still passes allocators explicitly.
  *
  * THREADING: flecs calls these from its worker threads once ecs_set_threads()
- * is used (M7). The tracking allocator's counters are not atomic, so tracking
- * must either be made thread-safe or bypassed before workers are enabled.
- * See plan/05-concurrency.md. */
+ * is used. Safe: the tracking allocator's counters have been atomic since M4
+ * (relaxed adds, a CAS loop for the peak -- see core/alloc.c), which is what
+ * makes enabling workers TSan-clean. */
 static mye_allocator g_flecs_allocator;
 
 static void *mye_flecs_malloc(ecs_size_t size)

@@ -1,4 +1,7 @@
-/* Bounded lock-free queue for passing messages between threads.
+/* Bounded mutex-protected queue for passing messages between threads.
+ * Deliberately NOT lock-free: a handful of messages per frame is not a hot
+ * spot, and it is multi-producer with messages that must not be lost -- see
+ * the primitive policy in plan/05-concurrency.md.
  * See plan/05-concurrency.md.
  *
  * A channel in the usual sense: threads exchange *messages*

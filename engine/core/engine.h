@@ -47,7 +47,7 @@ extern ecs_entity_t MyeOnFixedUpdate;
 /* The frame's draw order, as an explicit chain of phases:
  *
  *   EcsOnStore        BeginDrawing + clear      (engine)
- *   MyeOnCamera       follow / orbit systems    (engine + game)
+ *   MyeOnCamera       follow / camera systems   (engine + game)
  *   MyeOnDrawCanvases off-screen canvases       (canvas)
  *   MyeOnDraw3D       world-space 3D pass       (render3d)
  *   MyeOnDraw2D       world-space sprite pass   (render2d)

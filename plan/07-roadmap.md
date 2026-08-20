@@ -89,8 +89,11 @@ splitting rocks, score, restart.
 - Fixed-timestep accumulator + render interpolation.
 - Sprite rendering with atlas + layer/y sorting; `Camera2D`; text.
 - Sprite flipbook animation.
-- 2D collision: circle/AABB overlap → collision events.
-- Audio module: sfx + music.
+- 2D collision: circle/AABB overlap → collision events. *(Shipped
+  engine-side 2026-08-20 as `engine/collision`; until then the example did
+  its own overlap test in game code.)*
+- Audio module: sfx + music. *(Music -- streaming, `mye_music` -- shipped
+  2026-08-20; M3 itself shipped sfx only.)*
 - Sync asset loading (minimal registry from [06-assets.md](06-assets.md)).
 - Prefabs for bullets/rocks.
 
@@ -144,7 +147,9 @@ Notes for later:
 ## M4 — Asset manager (M) ✅
 
 - Full handle registry ([06-assets.md](06-assets.md)): generations, dedupe,
-  refcount, placeholder-on-stale. Slot storage uses `mye_pool`.
+  refcount, placeholder-on-stale. Slot storage is plain fixed arrays -- the
+  planned `mye_pool` backing was never adopted, and the pool currently has no
+  consumer at all (see plan/15-gaps.md).
 - Worker pool (C11 threads) + `mye_channel` on Concurrency Kit
   ([05-concurrency.md](05-concurrency.md)).
 - ~~Async load~~ — removed later: see plan/06-assets.md. Loading happens at scene boundaries.
@@ -221,7 +226,8 @@ Notes for later:
   assets (release on unload).
 - Prefab library pattern for spawnables.
 - Serialization via flecs JSON reflection.
-- Menu→game→menu flow in the M3 game.
+- Menu→game→menu flow in the M3 game. *(Shipped 2026-08-20: Asteroids now
+  runs a menu scene and a play scene through the scene system.)*
 
 **DoD**: ✅ `engine/scene/scene.[ch]` and `engine/scene/serialize.[ch]`.
 16 headless tests: 10 for scene lifecycle (deferred switching, entity
@@ -319,14 +325,16 @@ Notes:
 - The dev server sends COOP/COEP already, so enabling pthreads later is a
   build flag rather than a redeployment.
 
-Still to do (tier 2 of [11-web-dev-loop.md](11-web-dev-loop.md)): snapshot
-the world to JSON before a reload and restore it after, so a rebuild does not
-restart the game. The serializer for it already exists (M6).
+Tier 2 of [11-web-dev-loop.md](11-web-dev-loop.md) -- snapshot the world to
+JSON before a reload, restore after -- **shipped** (2026-08-20): a rebuild no
+longer restarts the game. Known limits are recorded in 11-web-dev-loop.md.
 
 Two habits to keep so this stays cheap: never add a second blocking loop, and
 keep every path working with zero workers.
 
 ## After M8 (Tier 3, unscheduled)
 
-Custom shaders/post-fx · particles · skeletal animation · physics integration ·
-Lua scripting · editor tooling. Revisit after shipping a second small game.
+Custom shaders/post-fx · particles · physics integration · Lua scripting ·
+editor tooling. Revisit after shipping a second small game. (Skeletal
+animation was on this list and has since shipped: `MyeModelAnimator`, demoed
+by the showcase's fox.)

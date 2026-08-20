@@ -30,7 +30,7 @@ components, systems and singletons into the world.
 
 ```c
 // engine/render/render2d.h
-void MyeRender2dImport(ecs_world_t *world);
+void MyeRender2dModuleImport(ecs_world_t *world); /* every module: <Name>ModuleImport */
 
 // usage in a game
 ECS_IMPORT(world, MyeRender2d);
@@ -86,10 +86,10 @@ int main(void) {
 
     game_setup(world);                   // game components, systems, scene
 
-    while (!WindowShouldClose()) {
-        ecs_progress(world, GetFrameTime());   // runs ALL systems, in phases
-    }
-    return mye_shutdown(world);          // ecs_fini + CloseWindow
+    while (mye_running(world)) {               // not WindowShouldClose():
+        mye_progress(world, GetFrameTime());   // input polling and the fixed
+    }                                          // pipeline live in mye_progress,
+    return mye_shutdown(world);                // outside the main ecs pipeline
 }
 ```
 

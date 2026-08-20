@@ -35,7 +35,7 @@ typedef struct { float x, y; }            MyePosition2D;
 typedef struct { float angle; }           MyeRotation2D;    // radians
 typedef struct { Vector3 v; }             MyePosition3D;    // raylib Vector3
 typedef struct { Quaternion q; }          MyeRotation3D;
-typedef struct { float x, y, z; }         MyeScale;
+typedef struct { float x, y; }            MyeScale2D;   /* and MyeScale3D */
 typedef struct { Matrix m; }              MyeWorldTransform; // computed, PostUpdate
 
 // movement
@@ -60,7 +60,7 @@ typedef struct { Camera3D cam; bool active; } MyeCamera3D;
 ```
 
 Singletons (resources): `MyeTime` (dt, fixed-dt accumulator, frame count),
-`MyeInput` (action states, see input module), `MyeAssetDb` (registries).
+`MyeInput` (action states, see input module), `MyeAssets` (registries).
 
 ## Phase layout
 
@@ -69,7 +69,9 @@ Systems register into flecs' builtin phases as described in
 
 - **Gameplay systems** (game-defined) go in `EcsOnUpdate` and, where they need
   fixed timestep, read `MyeTime.fixed_dt` and run inside the accumulator
-  pattern (helper: `mye_fixed_system()` wrapper, designed in M2).
+  pattern. (The planned `mye_fixed_system()` wrapper became something better:
+  the `MyeOnFixedUpdate` phase, run by `mye_progress` in its own pipeline --
+  register a system there and the accumulator is handled for you.)
 - **Transform propagation** runs in `EcsPostUpdate`: a query with
   `MyeWorldTransform` + `?MyeWorldTransform(up ChildOf)` (parent term, using
   flecs' `cascade`/`up` traversal so parents are computed before children).
@@ -83,7 +85,9 @@ Systems register into flecs' builtin phases as described in
   the same phase.
 - **Observers for reactions**: e.g. `OnSet MyeSprite` → resolve the texture
   handle; `OnRemove` scene tag → free scene-owned assets.
-- **Tags for state**: empty components (`MyeHidden`, `MyeActiveScene`) instead
+- **Tags for state**: empty components (`MyeHidden`; the planned
+  `MyeActiveScene` tag became scene-ownership pairs instead -- see
+  scene/scene.h) instead
   of booleans in components — queries can filter on them for free.
 - **Prefabs for spawnables**: enemy/bullet templates as `EcsPrefab` entities;
   instantiate with `EcsIsA` pairs.

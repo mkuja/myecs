@@ -53,7 +53,7 @@ both passes active in the same frame.
   system writing `cam.target` from a followed entity's transform.
 - **Text**: raylib `DrawTextEx` with loaded `Font` assets; UI text renders in
   `RenderUIPass` (screen space).
-- **Interpolation** (designed, not yet built): with a fixed timestep the
+- **Interpolation** (built; see `MyeInterpolate`): with a fixed timestep the
   simulation advances in 1/60 s jumps while the display may refresh at 144 Hz,
   so most drawn frames fall *between* two simulated states. Drawing the most
   recent one makes motion judder. `MyeTime.alpha` -- already computed and
@@ -88,7 +88,7 @@ both passes active in the same frame.
     would call it. A permanent `MyeNoInterpolate` is the wrong tool there --
     the ship should be smoothed on every frame except the one it wraps.
   - Discoverability is the **debug overlay's** job, not the engine's:
-    reporting `alpha 0.37 - interpolated 0/412 entities` shows the feature
+    reporting `alpha 0.37 - interpolated 0/412 entities` (which it now does) shows the feature
     exists without the engine deciding to use it for you.
 
   Interpolation also renders one step in the past, trading ~16 ms of latency

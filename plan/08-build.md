@@ -76,7 +76,7 @@ modules are therefore prefixed (`MyeCompilerFlags.cmake`,
 | Target | Type | Notes |
 |---|---|---|
 | `engine` | STATIC lib | links raylib + flecs PUBLIC; `mye_flags` PRIVATE; headers under `engine/` exported as include dir |
-| `example_00_hello` … | executables | one per `examples/*`; link `engine` |
+| `example_00_hello` … | executables | one per `examples/*`; link `engine` (except 00_hello, which links raylib alone as a toolchain proof) |
 | `test_unit_<module>` | executables | one per unit test file, `tests/unit/test_<module>.c` |
 | `test_int_<feature>` | executables | one per integration test, `tests/integration/` |
 
@@ -103,7 +103,7 @@ suite is expected to be clean under them (`ASAN_OPTIONS`/`UBSAN_OPTIONS` with
 cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug
 cmake --build build/debug -j
 ctest --test-dir build/debug --output-on-failure
-./build/debug/examples/02_game2d/example_02_game2d
+./build/debug/examples/example_02_asteroids
 ```
 
 `compile_commands.json` is exported (`CMAKE_EXPORT_COMPILE_COMMANDS ON`) for
