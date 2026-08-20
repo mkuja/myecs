@@ -24,8 +24,15 @@ target_link_libraries(example_05_showcase PRIVATE mye_flags engine)
 add_executable(example_06_tutorial 06_tutorial/main.c)
 target_link_libraries(example_06_tutorial PRIVATE mye_flags engine)
 
+# The wire format and the relay live in a library, so the integration test
+# drives the same relay the example runs -- a test server that is a second
+# implementation would be testing the wrong thing.
+add_library(net_presence STATIC 07_net/presence.c)
+target_include_directories(net_presence PUBLIC 07_net)
+target_link_libraries(net_presence PRIVATE mye_flags PUBLIC engine)
+
 add_executable(example_07_net 07_net/main.c)
-target_link_libraries(example_07_net PRIVATE mye_flags engine)
+target_link_libraries(example_07_net PRIVATE mye_flags net_presence)
 
 # Web builds: shell page, ASYNCIFY, growable heap. Defined in
 # cmake/MyeWeb.cmake, which is only included under emcmake.

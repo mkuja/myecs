@@ -215,3 +215,134 @@ uint64_t mye_net_bytes_sent(const mye_net_conn *conn)
 {
     return conn != NULL ? conn->bytes_out : 0;
 }
+
+/* ------------------------------------------------------------- reconnect -- */
+
+/* No socket, no clock, no allocator: the timing of a reconnect, separated
+ * from the reconnecting so it can be tested in a loop. See net.h for why the
+ * engine hands this out instead of redialling by itself. */
+
+static double clamp_positive(double value, double fallback)
+{
+    return value > 0.0 ? value : fallback;
+}
+
+/* xorshift32: deterministic, seeded by the caller. rand() would tie the
+ * spread to a process-wide sequence somebody else is also drawing from, and
+ * a test could then not predict it. */
+static uint32_t backoff_random(mye_net_backoff *backoff)
+{
+    uint32_t x = backoff->rng;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    backoff->rng = x;
+    return x;
+}
+
+void mye_net_backoff_init(mye_net_backoff *backoff,
+                          const mye_net_backoff_config *config)
+{
+    if (backoff == NULL) {
+        return;
+    }
+    memset(backoff, 0, sizeof *backoff);
+    backoff->config = config != NULL ? *config : (mye_net_backoff_config){ 0 };
+
+    mye_net_backoff_config *c = &backoff->config;
+    c->first_delay = clamp_positive(c->first_delay, 0.5);
+    c->max_delay = clamp_positive(c->max_delay, 8.0);
+    /* A factor below 1 would shorten every rung instead of lengthening it,
+     * which is a typo rather than a policy. */
+    c->factor = c->factor >= 1.0 ? c->factor : 2.0;
+    if (c->max_attempts < 0) {
+        c->max_attempts = 0;
+    }
+    if (c->jitter < 0.0) c->jitter = 0.0;
+    if (c->jitter > 1.0) c->jitter = 1.0;
+    if (c->max_delay < c->first_delay) {
+        c->max_delay = c->first_delay;
+    }
+
+    backoff->delay = c->first_delay;
+    backoff->rng = c->seed != 0 ? c->seed : 1u;
+}
+
+bool mye_net_backoff_exhausted(const mye_net_backoff *backoff)
+{
+    if (backoff == NULL) {
+        return true;
+    }
+    return backoff->config.max_attempts > 0 &&
+           backoff->attempts >= backoff->config.max_attempts;
+}
+
+void mye_net_backoff_failed(mye_net_backoff *backoff)
+{
+    if (backoff == NULL || backoff->waiting ||
+        mye_net_backoff_exhausted(backoff)) {
+        /* Already counting down, or out of attempts. Not restarting the wait
+         * is the point: this is called from a status check that runs every
+         * frame, and a timer reset sixty times a second never expires. */
+        return;
+    }
+
+    double wait = backoff->delay;
+    if (backoff->config.jitter > 0.0) {
+        /* Somewhere in [(1 - jitter) * delay, delay]. */
+        double unit = (double)(backoff_random(backoff) >> 8) / 16777216.0;
+        wait -= wait * backoff->config.jitter * unit;
+    }
+
+    backoff->remaining = wait;
+    backoff->waiting = true;
+}
+
+void mye_net_backoff_connected(mye_net_backoff *backoff)
+{
+    if (backoff == NULL) {
+        return;
+    }
+    backoff->attempts = 0;
+    backoff->delay = backoff->config.first_delay;
+    backoff->remaining = 0.0;
+    backoff->waiting = false;
+}
+
+bool mye_net_backoff_ready(mye_net_backoff *backoff, double dt)
+{
+    if (backoff == NULL || !backoff->waiting) {
+        return false;
+    }
+    if (mye_net_backoff_exhausted(backoff)) {
+        backoff->waiting = false;
+        backoff->remaining = 0.0;
+        return false;
+    }
+
+    if (dt > 0.0) {
+        backoff->remaining -= dt;
+    }
+    if (backoff->remaining > 0.0) {
+        return false;
+    }
+
+    backoff->waiting = false;
+    backoff->remaining = 0.0;
+    ++backoff->attempts;
+
+    /* The next failure waits one rung longer, up to the ceiling. */
+    backoff->delay *= backoff->config.factor;
+    if (backoff->delay > backoff->config.max_delay) {
+        backoff->delay = backoff->config.max_delay;
+    }
+    return true;
+}
+
+double mye_net_backoff_remaining(const mye_net_backoff *backoff)
+{
+    if (backoff == NULL || !backoff->waiting) {
+        return 0.0;
+    }
+    return backoff->remaining > 0.0 ? backoff->remaining : 0.0;
+}

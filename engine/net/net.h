@@ -105,4 +105,80 @@ uint64_t mye_net_bytes_sent(const mye_net_conn *conn);
  * than discovering it from a NULL. */
 bool mye_net_can_listen(void);
 
+/* --------------------------------------------------------------- reconnect -- */
+
+/* Reconnect timing, as a state machine with no socket in it.
+ *
+ * The engine never reconnects on your behalf: a game that lost its server
+ * may want a lobby screen, a save, or a clean exit, and an engine that
+ * quietly redialled would have made that choice for it. What the engine can
+ * usefully own is the arithmetic nobody enjoys re-deriving -- wait a little,
+ * then longer, then give up -- so this is that arithmetic and nothing else.
+ *
+ *   mye_net_backoff back;
+ *   mye_net_backoff_init(&back, NULL);
+ *   ...
+ *   if (mye_net_status_of(conn) == MYE_NET_ERROR) {
+ *       mye_net_backoff_failed(&back);       // start (or lengthen) the wait
+ *   }
+ *   if (mye_net_backoff_ready(&back, dt)) {  // true once, when it is time
+ *       mye_net_destroy(conn);
+ *       conn = mye_net_connect(alloc, url, NULL);
+ *   }
+ *   if (mye_net_status_of(conn) == MYE_NET_OPEN) {
+ *       mye_net_backoff_connected(&back);    // back to the first delay
+ *   }
+ *
+ * Pure: no clock, no allocator, no I/O. dt comes from the caller, which is
+ * what makes it testable in a loop with no sockets and no sleeping. */
+typedef struct mye_net_backoff_config {
+    double first_delay; /* seconds before the first retry; default 0.5 */
+    double max_delay;   /* ceiling on the wait; default 8 */
+    double factor;      /* multiplier per failure; default 2 */
+    int max_attempts;   /* 0 = keep trying forever */
+    /* Fraction of the delay to spread the retry over, 0..1; default 0. The
+     * wait then lands somewhere in [(1 - jitter) * delay, delay]. With many
+     * clients reconnecting to one server, an unjittered ladder makes them all
+     * dial in the same instant, again, at every rung. The spread is drawn
+     * from `seed` below, so it is scattered but not unpredictable -- a test
+     * can still assert exact timings. */
+    double jitter;
+    uint32_t seed; /* 0 means 1; the sequence is fixed by this value */
+} mye_net_backoff_config;
+
+typedef struct mye_net_backoff {
+    mye_net_backoff_config config;
+    int attempts;     /* retries handed out so far */
+    double delay;     /* the current rung of the ladder */
+    double remaining; /* seconds left to wait; only meaningful while waiting */
+    uint32_t rng;
+    bool waiting;
+} mye_net_backoff;
+
+/* `config` may be NULL, and any zero field takes its default. */
+void mye_net_backoff_init(mye_net_backoff *backoff,
+                          const mye_net_backoff_config *config);
+
+/* The connection failed or dropped: begin waiting, one rung further up the
+ * ladder than last time. Calling it again while already waiting does not
+ * shorten or lengthen the current wait -- a status polled every frame must
+ * not restart the timer sixty times a second. */
+void mye_net_backoff_failed(mye_net_backoff *backoff);
+
+/* The connection is up again: back to the bottom of the ladder. */
+void mye_net_backoff_connected(mye_net_backoff *backoff);
+
+/* Advances the wait by `dt` and returns true exactly once, on the frame the
+ * next attempt is due. False while waiting, while not waiting at all, and
+ * forever once max_attempts is used up. */
+bool mye_net_backoff_ready(mye_net_backoff *backoff, double dt);
+
+/* Seconds until the next attempt, for a "reconnecting in 3s" line. Zero when
+ * nothing is pending. */
+double mye_net_backoff_remaining(const mye_net_backoff *backoff);
+
+/* True once max_attempts retries have been handed out: the game decides what
+ * that means -- a menu, a message, an exit. */
+bool mye_net_backoff_exhausted(const mye_net_backoff *backoff);
+
 #endif /* MYE_NET_NET_H */

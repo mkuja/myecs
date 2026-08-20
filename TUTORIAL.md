@@ -17,8 +17,8 @@ C.
 | [3. Phases: when things run](#3-phases-when-things-run) | [11. Scenes](#11-scenes) | [19. The debug overlay and the flecs Explorer](#19-the-debug-overlay-and-the-flecs-explorer) |
 | [4. The fixed timestep](#4-the-fixed-timestep) | [12. Input actions](#12-input-actions) | [20. Testing what you wrote](#20-testing-what-you-wrote) |
 | [5. Render interpolation (opt-in)](#5-render-interpolation-opt-in) | [13. Audio](#13-audio) | [21. The web target](#21-the-web-target) |
-| [6. Allocators](#6-allocators) | [14. 3D rendering](#14-3d-rendering) | [22. Capstone: Orbit Collector](#22-capstone-orbit-collector) |
-| [7. Assets and handles](#7-assets-and-handles) | [15. Skeletal animation](#15-skeletal-animation) |  |
+| [6. Allocators](#6-allocators) | [14. 3D rendering](#14-3d-rendering) | [22. Networking](#22-networking) |
+| [7. Assets and handles](#7-assets-and-handles) | [15. Skeletal animation](#15-skeletal-animation) | [23. Capstone: Orbit Collector](#23-capstone-orbit-collector) |
 
 ---
 
@@ -1752,7 +1752,143 @@ single-threaded.
 
 ---
 
-## 22. Capstone: Orbit Collector
+## 22. Networking
+
+**What it is.** One WebSocket connection, opened by the game, pumped by the
+engine, carrying byte blobs in both directions. A native build can also
+*listen*, so the server for your game is another build of your game.
+
+**Why it is.** A web build cannot open a socket; WebSocket is the only
+game-shaped channel a browser offers. Choosing it for desktop too means one
+piece of game code instead of two. Two consequences come with it and are not
+negotiable: delivery is reliable and ordered, so a lost packet stalls
+everything behind it (fine for co-op, chat and lobbies; wrong for twitch
+action), and a browser can only ever be a client.
+
+Opening a connection is one call, and handing it to the engine is one more:
+
+```c ctx
+mye_net_conn *conn = mye_net_connect(mye_allocator_of(world),
+                                     "ws://localhost:9010/", NULL);
+if (conn != NULL) {
+    mye_net_register(world, conn);   /* pumped from now on */
+}
+
+/* ... and at shutdown, in this order. Unregister first, or the pump will
+ * service freed memory next frame. */
+mye_net_unregister(world, conn);
+mye_net_destroy(conn);
+```
+
+`mye_net_register` is the whole design of the module. The engine services the
+connections you gave it and no others: an unregistered connection is never
+touched, which is what makes a tool, a test, or a second connection on its own
+schedule possible to write. The pump runs inside `mye_progress`, in the same
+slot as input polling — *before* the fixed steps — so this frame's simulation
+sees this frame's messages.
+
+What it publishes is a singleton, `MyeNetStatus`: status, peer count, queue
+depths, bytes in and out. The debug overlay (§19) shows a `net` line whenever
+something is registered, and your HUD can read the same struct.
+
+**Nothing here interprets a message.** The engine moves bytes; what they mean
+is gameplay. So a game drains the queue itself, in its own system:
+
+```c file
+typedef struct Chat { int lines; } Chat;
+ECS_COMPONENT_DECLARE(Chat);
+
+/* Registered in MyeOnFixedUpdate: the pump has already run this frame. */
+void ChatReceive(ecs_iter_t *it)
+{
+    Chat *chat = ecs_field(it, Chat, 0);
+    const MyeNetStatus *net = ecs_singleton_get(it->world, MyeNetStatus);
+    if (net == NULL || net->count == 0) {
+        return;
+    }
+
+    unsigned char buffer[256];
+    size_t size;
+    while ((size = mye_net_recv(net->conns[0], buffer, sizeof buffer,
+                                NULL)) > 0) {
+        /* The first byte says what the rest means. Route on it before
+         * parsing anything: an unknown kind is skipped, never guessed at. */
+        switch (buffer[0]) {
+        case 1: /* a position */    break;
+        case 2: chat->lines += 1;   break;
+        default:                    break;
+        }
+    }
+}
+```
+
+That one-byte kind prefix is a convention, not an API — the engine ships no
+serialization opinion at all. [examples/07_net/presence.h](examples/07_net/presence.h)
+is the smallest honest version of it, written to be copied: kind byte first,
+integers written least significant byte first (the web build is a different
+compiler), and a decoder that returns `false` for anything it does not
+understand completely. Malformed input is the normal case on a socket anyone
+can connect to.
+
+**Remote entities want `MyeInterpolate` (§5).** Positions arrive at the
+network rate — fifteen times a second in the example — while the screen
+refreshes sixty or a hundred and forty-four times a second. Interpolation is
+exactly the tool for that gap. Give a remote entity the component, apply
+arriving positions in a fixed-step system, and it moves smoothly at any
+refresh rate.
+
+**Reconnecting is yours, and the engine does not do it behind your back.** A
+game that lost its server may want a lobby screen, a save, or a clean exit.
+What the engine hands you is the arithmetic — wait a little, then longer, then
+give up:
+
+```c ctx
+static mye_net_backoff backoff;
+mye_net_backoff_init(&backoff, &(mye_net_backoff_config){
+    .first_delay = 0.5, .max_delay = 5.0, .factor = 2.0, .jitter = 0.2 });
+
+mye_net_conn *conn = NULL; /* whatever you are holding */
+double dt = 1.0 / 60.0;
+
+if (mye_net_status_of(conn) == MYE_NET_OPEN) {
+    mye_net_backoff_connected(&backoff);          /* back to the first rung */
+} else {
+    mye_net_backoff_failed(&backoff);             /* begin waiting */
+    if (mye_net_backoff_ready(&backoff, dt)) {    /* true once, when due */
+        mye_net_unregister(world, conn);
+        mye_net_destroy(conn);
+        /* ... redial and register the new one ... */
+    }
+}
+```
+
+It is a pure state machine: no clock, no socket, `dt` from the caller. That is
+what makes it testable without a network, and
+[tests/unit/test_net_backoff.c](tests/unit/test_net_backoff.c) tests it that
+way.
+
+**Try it.** The presence example is a relay and its clients in one binary:
+
+```sh
+cmake --build build/debug -j --target example_07_net
+./build/debug/examples/example_07_net --serve &   # the relay, headless
+./build/debug/examples/example_07_net &           # one client
+./build/debug/examples/example_07_net             # and another
+```
+
+Arrows move your dot; the other client's dot moves on your screen. Type and
+press Enter to chat. The round-trip time is on screen from the first frame,
+deliberately: with TCP underneath, the cost of a stall should be visible while
+you build rather than discovered in a bug report.
+
+**What it does not do yet.** No `wss://` on native (no TLS — `ws://` only, and
+a `wss://` URL is refused rather than silently downgraded); no UDP-like
+transport; no state synchronisation, interest management or matchmaking. See
+[plan/12-networking.md](plan/12-networking.md).
+
+---
+
+## 23. Capstone: Orbit Collector
 
 Every feature above, in one game.
 

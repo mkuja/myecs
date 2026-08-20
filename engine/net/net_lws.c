@@ -570,6 +570,20 @@ void mye_net_pump(mye_net_conn *conn)
             }
         }
     }
+
+    /* A connection can be left holding bytes lws has already read from the
+     * socket but not yet handed to a callback -- the handshake response and
+     * the first frame arriving in one read does exactly that. No new POLLIN
+     * will ever arrive to prompt it, so without this the message sits in a
+     * buffer until the peer happens to send something else, which looks like
+     * a message that was silently lost.
+     *
+     * lws calls this "forced service" and says so by returning a zero
+     * timeout; a -1 timeout then services precisely those connections and
+     * nobody else. It does not wait (lws-service.h). */
+    if (lws_service_adjust_timeout(b->ctx, 1, 0) == 0) {
+        lws_service_tsi(b->ctx, -1, 0);
+    }
 }
 
 /* ---------------------------------------------------------------- send -- */

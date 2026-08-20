@@ -16,6 +16,7 @@ add_library(engine STATIC
     scene/serialize.c
     scene/transform.c
     net/net.c
+    net/net_module.c
     $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:net/net_lws.c>
     $<$<BOOL:${EMSCRIPTEN}>:net/net_web.c>
 )
