@@ -92,6 +92,9 @@ target_compile_definitions(raylib PRIVATE
 # same way -Werror applies only to first-party code.
 if(EMSCRIPTEN)
     set_target_properties(raylib PROPERTIES C_EXTENSIONS ON)
+    # ...and its runtime-method export would otherwise overwrite ours; see
+    # cmake/MyeWeb.cmake.
+    mye_web_drop_raylib_runtime_methods()
 endif()
 
 target_link_libraries(raylib PRIVATE mye_alloc)

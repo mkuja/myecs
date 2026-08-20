@@ -1,9 +1,11 @@
 # 11 — Web development loop (build, serve, hot-reload)
 
-> **Status: planned, not started.** Part of **M8**. The target itself is
-> described in [10-web.md](10-web.md); this document is about the *workflow*:
-> one command that builds to WebAssembly, serves it, and reloads the browser
-> when a source file changes.
+> **Status: shipped (M8).** The target itself is described in
+> [10-web.md](10-web.md); this document is about the *workflow*: one command
+> that builds to WebAssembly, serves it, and reloads the browser when a source
+> file changes. Both reload tiers now exist, the web build is part of
+> `tools/check.sh`, and there is an `emrun` target. The one thing deliberately
+> not built is the loop inversion (`mye_run`) — see the decision in §1.
 
 ## Verdict: not complicated
 
@@ -68,7 +70,8 @@ measured threading rather than assuming.
 A caveat specific to hot reload: with ASYNCIFY the program is *inside* a
 blocking loop when a rebuild lands, so tier-2 snapshotting has to happen at a
 frame boundary. In practice that means the snapshot hook lives at the top of
-the frame, checking a flag JS sets -- which is where it would sit anyway.
+the frame, checking a flag JS sets -- which is where it would sit anyway, and
+which is exactly what `mye_web_reload_poll()` does today.
 
 ### 2. The lighting shader is desktop-only (a real bug, found while planning)
 
@@ -187,8 +190,11 @@ side, and the latency that matters (rebuild time) dwarfs the 500 ms poll.
 
 **Why our own server rather than `emrun`:** `emrun` is fine for a one-shot run
 and usefully pipes the app's stdout to the terminal, but it cannot serve the
-build-id endpoint or the isolation headers. Keep an `emrun` target as well --
-it is the better tool for debugging a single run.
+build-id endpoint or the isolation headers. There is an `emrun` target as well
+-- `mye_web_configure()` adds `run_<target>` for every web example, so
+`cmake --build build/web --target run_example_02_asteroids` opens one in a
+browser. It is the better tool for debugging a single run; this server is the
+better tool for iterating.
 
 ## Hot reload, in two tiers
 
@@ -204,30 +210,76 @@ scenes load fast.
 
 ### Tier 2 — state-preserving reload
 
-Before reloading, snapshot the world; after reloading, restore it. **M6 built
-exactly this** ([serialize.h](../engine/scene/serialize.h)):
+**Built**, in [engine/core/web_reload.c](../engine/core/web_reload.c) (a
+web-only translation unit) and the matching half of
+[web/shell.html](../web/shell.html), on top of M6's serializer
+([serialize.h](../engine/scene/serialize.h)):
 
 ```
-1. page receives "build changed"
-2. calls exported mye_web_snapshot()  -> mye_world_to_json()
-3. stores the string in sessionStorage
+1. page sees /build-id change
+2. window.myeSnapshot() calls the exported mye_web_snapshot()
+3. one frame later the engine runs mye_world_to_json() and hands the string
+   to Module.myeStashSnapshot(), which puts it in sessionStorage
 4. location.reload()
-5. new module boots, finds the snapshot, calls mye_world_from_json()
+5. the new module's onRuntimeInitialized reads sessionStorage, clears it, and
+   passes the string to the exported mye_web_restore()
+6. the first frame after mye_init applies it with mye_world_from_json()
 ```
 
-Both C functions are exported with `EMSCRIPTEN_KEEPALIVE` and called from JS.
-The cost is a few dozen lines.
+Both C functions are `EMSCRIPTEN_KEEPALIVE` exports, as sketched -- but both
+only **queue**. The work happens at the top of a frame, inside `mye_progress`.
+That is the one thing the sketch got wrong: with ASYNCIFY the C stack spends
+most of its life unwound inside raylib's frame, so serializing or loading from
+a JS callback reaches into flecs from the middle of a pipeline run -- exactly
+the trap [net_web.c](../engine/net/net_web.c) documents, where the loop simply
+stops advancing and nothing reports an error. Queueing also means the JS side
+has no timing rules to obey, and that **no example changed**: `mye_progress`
+already owns the only moment the world may be touched, so it needs no
+registration hook to find the world.
 
-Two honest limits:
+Four honest limits, the last two found by running it:
 
-- **Only reflected components survive.** Anything without an `ecs_struct`
-  description is silently absent -- the same trap M6 documented, but now with
-  visible consequences. `mye_component_serializable()` exists to audit it.
+- **Only reflected components survive** -- and the survivor is the component,
+  not its value. A component without an `ecs_struct` description comes back
+  *present but uninitialized*, which is worse than absent: in the tutorial a
+  restored mine drifted off across the screen carrying a `Velocity` nobody
+  serialized (the recycled bytes happened to read as `MINE_RADIUS`).
+  `mye_component_serializable()` exists to audit this before it bites.
 - **Asset handles do not survive** a module reload; they index into a registry
   the new module rebuilds from scratch. Scenes must reload their assets, which
   they already do, so this works as long as snapshots restore *entity state*
   rather than handles. A scene that reloads its assets and then applies a
   snapshot of positions and gameplay values is the working pattern.
+- **Anonymous children do not survive.** flecs writes an anonymous entity that
+  has a parent as `{"parent": "player", "name": "#524"}`, and `#524` means a
+  raw entity id, which in a fresh module belongs to something else entirely.
+  The tutorial's shield -- its only `ChildOf` child -- is the one entity that
+  does not come back. Give a child a name if it must survive.
+- **Restore adds to the running world, it does not replace it.** Entities
+  return even when the scene that owned them is not loaded, still carrying a
+  `MyeSceneOf` pair pointing at a scene the new module has never loaded. Tier
+  2 resumes a rebuild; it is not a save-game system.
+
+**Verified** in headless chromium against `example_06_tutorial`, driving the
+play scene and then snapshotting (temporary probe lines, since removed):
+
+```
+[INFO engine] play: 8 orbs, 5 mines
+[INFO engine] web: snapshot of 8929 bytes
+[INFO engine] PROBE at-snapshot: frame 488, 16 positions, checksum 11119.509
+... location.reload() ...
+[INFO engine] menu
+[INFO engine] PROBE before-restore: frame 0, 0 positions, checksum 0.000
+[INFO engine] web: restored 8929 bytes of world state
+[INFO engine] PROBE after-restore: frame 0, 15 positions, checksum 11084.385
+```
+
+A cold start has nothing (`0 positions`); after the reload every orb and mine
+is back at the coordinates it had a moment earlier, one entity short -- the
+anonymous child above, whose 35.124 is the whole difference between the two
+checksums. Liveness was read from the console over a 34-second session
+(heartbeats to `frame 2040`), never from a screenshot, per
+[WEB-LOOP-STALL.md](WEB-LOOP-STALL.md).
 
 Tier 2 is a genuine payoff from decisions already made, not new machinery.
 
@@ -247,46 +299,66 @@ python3 tools/web_dev.py --example 02_asteroids --port 8080
 python3 tools/web_dev.py --target mygame                    # any CMake target
 
 # one-shot run with stdout piped to the terminal
-emrun --port 8080 build/web/examples/example_02_asteroids.html
+cmake --build build/web --target run_example_02_asteroids
 ```
 
-## Build configuration sketch
+## Build configuration
 
-```cmake
-if(EMSCRIPTEN)
-    set(CMAKE_EXECUTABLE_SUFFIX ".html")
-    target_link_options(example_02_asteroids PRIVATE
-        --shell-file ${CMAKE_SOURCE_DIR}/web/shell.html
-        -sUSE_GLFW=3
-        -sASYNCIFY                # start here; drop it if the loop is inverted
-        -sALLOW_MEMORY_GROWTH=1
-        -sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']
-        -sEXPORTED_FUNCTIONS=['_main','_mye_web_snapshot','_mye_web_restore'])
-endif()
-```
+[cmake/MyeWeb.cmake](../cmake/MyeWeb.cmake), applied per target by
+`mye_web_configure()`. Two departures from the sketch this section used to
+carry, both learned by linking it:
+
+- `_mye_web_snapshot` and `_mye_web_restore` are **not** in
+  `EXPORTED_FUNCTIONS`. `EMSCRIPTEN_KEEPALIVE` exports them already, and
+  naming a symbol a target does not define is a link error --
+  `example_00_hello` links raylib alone, with no engine and so no reload. The
+  list carries `_main`, `_malloc` and `_free` instead: the page allocates a
+  buffer for the snapshot rather than passing it through `cwrap`'s `'string'`,
+  which would put a whole world on the 1 MB wasm stack.
+- raylib links `-sEXPORTED_RUNTIME_METHODS=ccall` of its own, an `-s` setting
+  is an assignment rather than a list, and a dependency's interface options
+  land *after* the target's own -- so raylib's single value quietly replaced
+  ours and `cwrap` was missing at runtime. `MyeWeb.cmake` strips raylib's and
+  supplies a superset. The same ordering trap bit `OPENGL_VERSION`: it has to
+  be forced into the cache *before* raylib is added, or a fresh build tree
+  gets WebGL 1 and the lighting shader fails with "unsupported shader version
+  300" while a re-configured tree looks fine.
 
 Sanitizers, the TSan configuration and the render-labelled tests are all
 desktop-only and simply do not apply to this build.
 
 ## Order of work
 
-1. **Build target with ASYNCIFY**: `emcmake`, shell HTML, Asteroids running
-   in a browser. No engine changes at all -- this is deliberately first, so
-   everything after it is informed by a working build rather than a guess.
-2. **GLES shader variants** in `render3d.c` (needed for the 3D example; the
-   2D game does not touch that shader).
-3. **`MYE_THREADS_NONE`** backend in `thread.h`.
-4. **`tools/web_dev.py`**: serve, watch, rebuild, reload (tier 1).
-5. **Tier 2 snapshot/restore** on top of the existing serializer.
-6. **A build-check script** that compiles the web target, so desktop work
+1. ~~**Build target with ASYNCIFY**~~: `emcmake`, shell HTML, Asteroids
+   running in a browser. No engine changes at all -- this is deliberately
+   first, so everything after it is informed by a working build rather than a
+   guess.
+2. ~~**GLES shader variants**~~ in `render3d.c` (needed for the 3D example;
+   the 2D game does not touch that shader).
+3. ~~**`MYE_THREADS_NONE`**~~ backend in `thread.h`.
+4. ~~**`tools/web_dev.py`**~~: serve, watch, rebuild, reload (tier 1).
+5. ~~**Tier 2 snapshot/restore**~~ on top of the existing serializer.
+6. ~~**A build-check script**~~ that compiles the web target, so desktop work
    does not silently break it. There is no CI; this is one more command in
-   the by-hand verification sequence.
+   the by-hand verification sequence -- `tools/check.sh` builds one example
+   for the web when `emcc` is on PATH, and prints a skip note when it is not.
 7. **`mye_run()` and loop inversion** -- last, and only if ASYNCIFY's size or
-   speed cost is measured to matter.
+   speed cost is measured to matter. **Not built:** ASYNCIFY has not
+   misbehaved (see [WEB-LOOP-STALL.md](WEB-LOOP-STALL.md), where the one
+   suspected failure turned out to be the measurement), so the cost that would
+   justify the refactor has not appeared.
 
-**Definition of done:** `python3 tools/web_dev.py` builds Asteroids to WASM,
-serves it, and editing a `.c` file rebuilds and reloads the browser within a
-few seconds -- on Linux, macOS and Windows alike.
+**Definition of done:** met. `python3 tools/web_dev.py` builds to WASM, serves
+it, and editing a `.c` file rebuilds and reloads the browser within a few
+seconds -- observed end to end in headless chromium against the tutorial:
+
+```
+[web_dev] changed: main.c
+[web_dev] rebuilt in 2.6s (build 2) -- browser will reload
+[INFO  engine] web: snapshot of 4264 bytes      <- page, before reload
+[INFO  engine] menu                             <- fresh module
+[INFO  engine] web: restored 4264 bytes of world state
+```
 
 ## What this constrains today
 

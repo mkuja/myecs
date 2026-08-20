@@ -1,6 +1,7 @@
 #include "core/engine.h"
 
 #include "core/log.h"
+#include "core/web_reload.h"
 #include "debug/overlay.h"
 
 #include "asset/asset.h"
@@ -332,6 +333,13 @@ bool mye_progress(ecs_world_t *world, float dt)
     /* Scene switches land here, at a frame boundary: deleting a scene's
      * entities while systems are iterating them is how engines crash. */
     mye_scene_apply_pending(world);
+
+    /* Tier-2 hot reload, web only and compiled away everywhere else: a
+     * snapshot the page asked for is taken here, and a snapshot the page
+     * handed back is applied here -- after the scene switch above, so restored
+     * state lands on top of a loaded scene instead of being wiped by one.
+     * See core/web_reload.h for why this cannot happen in a JS callback. */
+    mye_web_reload_poll(world);
 
     /* Input is sampled here rather than from a system because the fixed steps
      * below must see *this* frame's input, and they cannot run from inside a

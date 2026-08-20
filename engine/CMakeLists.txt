@@ -18,6 +18,9 @@ add_library(engine STATIC
     net/net.c
     $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:net/net_lws.c>
     $<$<BOOL:${EMSCRIPTEN}>:net/net_web.c>
+    # Tier-2 hot reload. Its header is a no-op off the web, so engine.c calls
+    # it unconditionally and only this file is platform-specific.
+    $<$<BOOL:${EMSCRIPTEN}>:core/web_reload.c>
 )
 
 target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

@@ -31,15 +31,22 @@ add_library(mye_alloc STATIC
 target_include_directories(mye_alloc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/engine")
 target_link_libraries(mye_alloc PRIVATE mye_flags)
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/MyeDependencies.cmake")
-
 # The web build has no sanitizers, no threads and no test runner: emscripten
 # provides none of them, and the tests are a desktop concern.
+#
+# BEFORE the dependencies, not after: MyeWeb.cmake sets the OPENGL_VERSION
+# raylib is configured with, and raylib reads it as it is added below. With
+# this include after MyeDependencies the FORCE landed in the cache too late,
+# so a FRESH build tree silently got raylib's default WebGL 1 -- and only a
+# second configure of the same tree picked up WebGL 2. The symptom was the
+# lighting shader failing to compile with "unsupported shader version 300".
 if(EMSCRIPTEN)
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/MyeWeb.cmake")
 else()
     enable_testing()
 endif()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/MyeDependencies.cmake")
 
 add_subdirectory(engine)
 add_subdirectory(examples)
