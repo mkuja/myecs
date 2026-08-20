@@ -1237,6 +1237,73 @@ Note `mye_rl_malloc` above: the wave's samples are handed to raylib, which will
 free them with its own allocator, so they must be allocated with the matching
 one.
 
+### Music
+
+**What it is.** A track is an asset like any other — `mye_music_load` by path,
+released with its scene — but it is *streamed*: decoded a buffer at a time
+while it plays, instead of sitting in memory whole like a sound. OGG and WAV
+both work; the extension is never inspected, so whatever raylib can decode,
+the engine can play.
+
+```c ctx
+mye_music theme = mye_music_load(world, "audio/theme.ogg");
+
+mye_music_play(world, theme);                 /* once, at full volume */
+mye_music_play_ex(world, theme, 0.6f, true);  /* volume, looping */
+
+mye_music_pause(world);
+mye_music_resume(world);
+mye_music_set_volume(world, 0.3f);            /* master volume still applies */
+mye_music_stop(world);                        /* pause keeps the position;
+                                                 stop forgets it */
+```
+
+**Why it is.** Two things are worth knowing before you write a music system.
+
+First, **nothing here happens on its own.** Loading a track does not start it,
+and `mye_music_play` does not loop — `mye_music_play_ex(..., true)` is the only
+way to repeat. That is deliberate: raylib's loader turns looping on by default,
+and an engine that quietly kept your title theme running under the boss fight
+would be doing something you never asked for.
+
+Second, and unlike sounds, **music is not queued** — and that asymmetry is the
+interesting part. A sound is an *event*, so twenty of them in a frame are
+twenty events that need collapsing. Music is a *state*: which one track is
+playing, and how loud. So `mye_music_play` asks for a track to be playing, and
+asking for the track that is already playing does **nothing at all** — no
+restart, no second stream. Call it from a fixed-step system that runs five
+times in one frame, or from a system that runs every frame forever, and you get
+one stream that plays through undisturbed. To rewind on purpose, stop first:
+
+```c ctx
+mye_music theme = mye_music_load(world, "audio/theme.ogg");
+
+mye_music_stop(world);
+mye_music_play(world, theme);   /* from the beginning */
+```
+
+One track plays at a time; starting another stops the first. `mye_music_current`
+returns what is playing or paused, and a zero handle for neither — a
+non-looping track that reaches its end clears itself, so you can watch for it:
+
+```c ctx
+mye_music theme = mye_music_load(world, "audio/theme.ogg");
+
+if (mye_music_current(world).generation == 0) {
+    /* the fanfare finished; back to the level theme */
+    mye_music_play_ex(world, theme, 0.6f, true);
+}
+```
+
+Muting silences music without pausing it, so a muted track keeps its place —
+mute is a volume decision, not a transport one.
+
+The stream is fed once per frame from the same point that drains the sound
+queue. **A released track is safe to keep playing at**: the handle stops
+resolving, playing it does nothing, and the engine drops its own bookkeeping on
+the next frame — so a scene that unloads its music mid-fade does not take the
+game with it.
+
 ---
 
 ## 14. 3D rendering
