@@ -539,6 +539,15 @@ int main(void)
 }
 ```
 
+Two things the registry says out loud, so you are not left guessing. A load
+that fails leaves a **failure record** behind rather than an empty slot: it
+logs a warning with the path, keeps the key so `mye_asset_stats_get`'s
+`assets_failed` counts it, and retries in place the next time the same path is
+asked for. And at shutdown, every asset still loaded is named with its
+refcount — a report, not an error, since holding an asset for as long as the
+world lives is fine. What it catches is the scene that meant to release and
+did not.
+
 ### When to load
 
 Loading blocks, and that is the design rather than a gap: **load at scene
@@ -646,6 +655,62 @@ static void DespawnFinished(ecs_iter_t *it)
 ```
 
 Add `MyeHidden` to skip an entity when drawing without deleting it.
+
+### Text
+
+**What it is.** `MyeText` is a string on an entity, drawn for you. It is an
+ordinary 2D entity — its place comes from `MyePosition2D`, exactly like a
+sprite — so it can be parented, hidden with `MyeHidden`, or moved by anything
+that moves a transform. Fonts are assets (§7) with handles of their own.
+
+**Why it is.** Two decisions are worth knowing before you use it.
+
+**The string is copied, not borrowed.** Hand it a literal, a stack buffer, or
+raylib's `TextFormat` — whose returned pointer is a slot in a rotating ring
+that is overwritten a few calls later — and the component takes a copy from
+the engine allocator. The copy is freed when you replace it, remove the
+component, or delete the entity. Read `MyeText.text`; never free it, and never
+assign to it through `ecs_get_mut`. Change the string with `mye_text_set` (or
+another `ecs_set`); change the colour or size through `ecs_get_mut` as usual.
+
+**A font's size is part of its identity.** raylib rasterises a glyph atlas at
+load time, so the same file at 16px and at 48px are two atlases and two
+registry slots. `mye_font_load` therefore takes the size and keys on
+`path@size` — deduping on the path alone would hand the 16px atlas to whoever
+asked for 48px, and the text would come out blurry with nothing on screen to
+say why.
+
+```c ctx
+/* A HUD label. Screen space, drawn in MyeOnDrawUI: sixteen pixels from the
+ * corner stays sixteen pixels whatever the camera is doing. */
+ecs_entity_t score = mye_text_spawn(world, "SCORE 0", 16.0f, 16.0f, RAYWHITE);
+mye_text_set(world, score, TextFormat("SCORE %d", 1200));
+
+/* A font of your own. A zeroed handle -- what mye_text_spawn leaves -- means
+ * raylib's built-in font, so text appears before you have loaded anything. */
+mye_font ui = mye_font_load(world, "assets/fonts/Inter.ttf", 24);
+ecs_set(world, score, MyeText,
+        { .text = "SCORE 0", .font = ui, .size = 24.0f, .spacing = 1.0f,
+          .color = RAYWHITE });
+
+/* Right-align it: measuring needs the real glyph metrics, so this is 0,0 in
+ * a headless world. */
+Vector2 size = mye_text_measure(world, ecs_get(world, score, MyeText));
+ecs_set(world, score, MyePosition2D, { 1264.0f - size.x, 16.0f });
+
+/* A label that lives in the world instead, scrolling and scaling with the 2D
+ * camera. An explicit flag, never inferred from what else is on the entity. */
+ecs_entity_t tag = mye_text_spawn(world, "HQ", 500.0f, 320.0f, YELLOW);
+MyeText *label = ecs_get_mut(world, tag, MyeText);
+label->world_space = true;
+ecs_modified(world, tag, MyeText);
+```
+
+Two things about the world-space flag, both because that pass is its own
+system rather than a branch inside the sprite renderer: it runs after the
+sprites, so world-space text draws **over** every sprite (`layer` orders text
+against other text, not against sprites), and it draws for the window's
+cameras only — a canvas (§8, *Canvases*) receives sprites, not text.
 
 ### The 2D camera
 

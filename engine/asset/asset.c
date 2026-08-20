@@ -14,11 +14,16 @@ ECS_COMPONENT_DECLARE(MyeAssets);
  * theme and a boss theme, not a hundred. Each slot holds an open decoder and
  * a device buffer, so the cheap thing to be generous with is sfx. */
 #define MYE_MAX_MUSIC 16
+#define MYE_MAX_FONTS 32
 #define MYE_ASSET_KEY_MAX 128
 
 typedef enum asset_state {
     ASSET_EMPTY = 0,
     ASSET_LOADED,
+    /* A load that failed, with the key it was asked for kept so the registry
+     * can say which path it was. Not an asset: no handle resolves to it, and
+     * the next load of the same key reuses this slot to retry. See asset.h. */
+    ASSET_FAILED,
 } asset_state;
 
 typedef struct texture_slot {
@@ -70,6 +75,17 @@ typedef struct music_slot {
     bool wav_ctx;
 } music_slot;
 
+typedef struct font_slot {
+    uint32_t generation;
+    asset_state state;
+    uint32_t refcount;
+    uint32_t scope; /* which scene loaded it; 0 = unscoped */
+    /* "<path>@<size>": the rasterised size is part of what the slot holds,
+     * so it has to be part of what identifies it. See asset.h. */
+    char key[MYE_ASSET_KEY_MAX];
+    Font font;
+} font_slot;
+
 struct mye_asset_db {
     mye_allocator allocator;
 
@@ -77,9 +93,14 @@ struct mye_asset_db {
     sound_slot *sounds;
     model_slot *models;
     music_slot *music;
+    font_slot *fonts;
 
     Texture2D placeholder;
     bool placeholder_ready;
+    /* raylib's built-in font, borrowed not owned: it belongs to raylib and is
+     * unloaded by CloseWindow. Never pass it to UnloadFont. */
+    Font placeholder_font;
+    bool placeholder_font_ready;
     bool audio_ready;
     /* No window/GL: textures are recorded with their dimensions but never
      * uploaded, so registry behaviour stays testable headlessly. */
@@ -114,10 +135,11 @@ static void copy_key(char *dst, const char *src)
 
 /* Dedupe: a second request for a path already loaded shares that slot and
  * takes a reference, rather than loading and uploading it twice. */
-static int find_texture_by_key(const mye_asset_db *db, const char *key)
+static int find_texture_in_state(const mye_asset_db *db, const char *key,
+                                 asset_state state)
 {
     for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
-        if (db->textures[i].state == ASSET_LOADED &&
+        if (db->textures[i].state == state &&
             strcmp(db->textures[i].key, key) == 0) {
             return i;
         }
@@ -125,14 +147,61 @@ static int find_texture_by_key(const mye_asset_db *db, const char *key)
     return -1;
 }
 
+static int find_texture_by_key(const mye_asset_db *db, const char *key)
+{
+    return find_texture_in_state(db, key, ASSET_LOADED);
+}
+
+/* An empty slot, or -- when there is none left -- a failure record, which is
+ * bookkeeping and must never be the reason a real asset cannot load. */
 static int find_free_texture_slot(const mye_asset_db *db)
 {
+    int failed = -1;
     for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
         if (db->textures[i].state == ASSET_EMPTY) {
             return i;
         }
+        if (failed < 0 && db->textures[i].state == ASSET_FAILED) {
+            failed = i;
+        }
     }
-    return -1;
+    return failed;
+}
+
+/* Where a load of `key` should land. A failure record for this very key is
+ * the slot to take: the load is a retry of it, and leaving the record behind
+ * would double-count the same asset as both failed and loaded. */
+static int claim_index_for_texture(const mye_asset_db *db, const char *key)
+{
+    int retry = find_texture_in_state(db, key, ASSET_FAILED);
+    return retry >= 0 ? retry : find_free_texture_slot(db);
+}
+
+/* Records that a load failed, keyed by what was asked for. Reuses the record
+ * already standing for this key, so a game retrying every frame does not fill
+ * the registry with copies of one failure -- and warns only when the record
+ * is new, for the same reason. */
+static void record_texture_failure(mye_asset_db *db, const char *key)
+{
+    int index = find_texture_in_state(db, key, ASSET_FAILED);
+    if (index < 0) {
+        index = find_free_texture_slot(db);
+        if (index < 0) {
+            return; /* registry full: nothing left to record into */
+        }
+        mye_log_warn("assets: texture '%s' failed to load", key);
+    }
+
+    texture_slot *slot = &db->textures[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_FAILED;
+    slot->refcount = 0;
+    slot->scope = db->scope;
+    slot->texture = (Texture2D){ 0 };
+    slot->owned = false;
+    copy_key(slot->key, key);
 }
 
 static texture_slot *resolve_texture(const mye_asset_db *db,
@@ -154,7 +223,7 @@ static texture_slot *resolve_texture(const mye_asset_db *db,
 static mye_texture claim_texture_slot_ex(mye_asset_db *db, const char *key,
                                          Texture2D texture, bool owned)
 {
-    int index = find_free_texture_slot(db);
+    int index = claim_index_for_texture(db, key);
     if (index < 0) {
         if (texture.id != 0 && owned) {
             UnloadTexture(texture); /* registry full: do not leak the upload */
@@ -234,6 +303,7 @@ mye_texture mye_texture_load(ecs_world_t *world, const char *path)
         /* Decode on the CPU only -- enough to know the dimensions. */
         Image image = LoadImage(path);
         if (image.data == NULL) {
+            record_texture_failure(db, key);
             return (mye_texture){ 0 };
         }
         Texture2D fake = { .id = 0, .width = image.width,
@@ -244,6 +314,7 @@ mye_texture mye_texture_load(ecs_world_t *world, const char *path)
 
     Texture2D texture = LoadTexture(path);
     if (texture.id == 0) {
+        record_texture_failure(db, key);
         return (mye_texture){ 0 };
     }
     return claim_texture_slot(db, key, texture);
@@ -279,6 +350,7 @@ mye_texture mye_texture_from_image(ecs_world_t *world, const char *name,
     Texture2D texture = LoadTextureFromImage(image);
     UnloadImage(image); /* now lives on the GPU */
     if (texture.id == 0) {
+        record_texture_failure(db, key);
         return (mye_texture){ 0 };
     }
     return claim_texture_slot(db, key, texture);
@@ -377,16 +449,67 @@ static model_slot *resolve_model(const mye_asset_db *db, mye_model handle)
     return slot;
 }
 
+static int find_model_in_state(const mye_asset_db *db, const char *key,
+                               asset_state state)
+{
+    for (int i = 0; i < MYE_MAX_MODELS; ++i) {
+        if (db->models[i].state == state &&
+            strcmp(db->models[i].key, key) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int find_free_model_slot(const mye_asset_db *db)
+{
+    int failed = -1;
+    for (int i = 0; i < MYE_MAX_MODELS; ++i) {
+        if (db->models[i].state == ASSET_EMPTY) {
+            return i;
+        }
+        if (failed < 0 && db->models[i].state == ASSET_FAILED) {
+            failed = i;
+        }
+    }
+    return failed;
+}
+
+/* See claim_index_for_texture. */
+static int claim_index_for_model(const mye_asset_db *db, const char *key)
+{
+    int retry = find_model_in_state(db, key, ASSET_FAILED);
+    return retry >= 0 ? retry : find_free_model_slot(db);
+}
+
+static void record_model_failure(mye_asset_db *db, const char *key)
+{
+    int index = find_model_in_state(db, key, ASSET_FAILED);
+    if (index < 0) {
+        index = find_free_model_slot(db);
+        if (index < 0) {
+            return;
+        }
+        mye_log_warn("assets: model '%s' failed to load", key);
+    }
+
+    model_slot *slot = &db->models[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_FAILED;
+    slot->refcount = 0;
+    slot->scope = db->scope;
+    slot->model = (Model){ 0 };
+    slot->animations = NULL;
+    slot->animation_count = 0;
+    copy_key(slot->key, key);
+}
+
 static mye_model claim_model_slot(mye_asset_db *db, const char *key,
                                   Model model)
 {
-    int index = -1;
-    for (int i = 0; i < MYE_MAX_MODELS; ++i) {
-        if (db->models[i].state == ASSET_EMPTY) {
-            index = i;
-            break;
-        }
-    }
+    int index = claim_index_for_model(db, key);
     if (index < 0) {
         if (!db->headless) {
             UnloadModel(model);
@@ -412,13 +535,7 @@ static mye_model claim_model_slot(mye_asset_db *db, const char *key,
 
 static int find_model_by_key(const mye_asset_db *db, const char *key)
 {
-    for (int i = 0; i < MYE_MAX_MODELS; ++i) {
-        if (db->models[i].state == ASSET_LOADED &&
-            strcmp(db->models[i].key, key) == 0) {
-            return i;
-        }
-    }
-    return -1;
+    return find_model_in_state(db, key, ASSET_LOADED);
 }
 
 /* Six is arbitrary but ample: build trees put an executable three or four
@@ -496,6 +613,7 @@ mye_model mye_model_load(ecs_world_t *world, const char *path)
          * material for the model it hands back, so dropping the struct here
          * leaks it. */
         UnloadModel(model);
+        record_model_failure(db, key);
         return (mye_model){ 0 };
     }
 
@@ -547,6 +665,7 @@ mye_model mye_model_from_mesh(ecs_world_t *world, const char *name, Mesh mesh,
 
     Model model = LoadModelFromMesh(mesh); /* takes ownership of the mesh */
     if (model.meshCount == 0) {
+        record_model_failure(db, key);
         return (mye_model){ 0 };
     }
     model.materials[0].maps[MATERIAL_MAP_DIFFUSE].color = tint;
@@ -605,6 +724,61 @@ void mye_model_release(ecs_world_t *world, mye_model handle)
 
 /* ---------------------------------------------------------------- sounds -- */
 
+static int find_sound_in_state(const mye_asset_db *db, const char *key,
+                               asset_state state)
+{
+    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
+        if (db->sounds[i].state == state &&
+            strcmp(db->sounds[i].key, key) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int find_free_sound_slot(const mye_asset_db *db)
+{
+    int failed = -1;
+    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
+        if (db->sounds[i].state == ASSET_EMPTY) {
+            return i;
+        }
+        if (failed < 0 && db->sounds[i].state == ASSET_FAILED) {
+            failed = i;
+        }
+    }
+    return failed;
+}
+
+/* See claim_index_for_texture. */
+static int claim_index_for_sound(const mye_asset_db *db, const char *key)
+{
+    int retry = find_sound_in_state(db, key, ASSET_FAILED);
+    return retry >= 0 ? retry : find_free_sound_slot(db);
+}
+
+static void record_sound_failure(mye_asset_db *db, const char *key)
+{
+    int index = find_sound_in_state(db, key, ASSET_FAILED);
+    if (index < 0) {
+        index = find_free_sound_slot(db);
+        if (index < 0) {
+            return;
+        }
+        mye_log_warn("assets: sound '%s' failed to load", key);
+    }
+
+    sound_slot *slot = &db->sounds[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_FAILED;
+    slot->refcount = 0;
+    slot->scope = db->scope;
+    slot->sound = (Sound){ 0 };
+    copy_key(slot->key, key);
+}
+
 static sound_slot *resolve_sound(const mye_asset_db *db, mye_sound handle)
 {
     if (db == NULL || handle.generation == 0 ||
@@ -622,34 +796,29 @@ mye_sound mye_sound_load(ecs_world_t *world, const char *path)
 {
     mye_asset_db *db = db_get(world);
     if (db == NULL || path == NULL || !db->audio_ready) {
+        /* No device: see the note in mye_sound_from_wave. Not a failure of
+         * the asset, so nothing is recorded. */
         return (mye_sound){ 0 };
     }
 
     char key[MYE_ASSET_KEY_MAX];
     copy_key(key, path);
 
-    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
-        if (db->sounds[i].state == ASSET_LOADED &&
-            strcmp(db->sounds[i].key, key) == 0) {
-            ++db->sounds[i].refcount;
-            return (mye_sound){ .index = (uint32_t)i,
-                                .generation = db->sounds[i].generation };
-        }
+    int existing = find_sound_in_state(db, key, ASSET_LOADED);
+    if (existing >= 0) {
+        ++db->sounds[existing].refcount;
+        return (mye_sound){ .index = (uint32_t)existing,
+                            .generation = db->sounds[existing].generation };
     }
 
-    int index = -1;
-    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
-        if (db->sounds[i].state == ASSET_EMPTY) {
-            index = i;
-            break;
-        }
-    }
+    int index = claim_index_for_sound(db, key);
     if (index < 0) {
         return (mye_sound){ 0 };
     }
 
     Sound sound = LoadSound(path);
     if (sound.frameCount == 0) {
+        record_sound_failure(db, key);
         return (mye_sound){ 0 };
     }
 
@@ -678,26 +847,23 @@ mye_sound mye_sound_from_wave(ecs_world_t *world, const char *name, Wave wave)
     char key[MYE_ASSET_KEY_MAX];
     copy_key(key, name);
 
-    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
-        if (db->sounds[i].state == ASSET_LOADED &&
-            strcmp(db->sounds[i].key, key) == 0) {
-            UnloadWave(wave); /* caller handed over ownership */
-            ++db->sounds[i].refcount;
-            return (mye_sound){ .index = (uint32_t)i,
-                                .generation = db->sounds[i].generation };
-        }
+    int existing = find_sound_in_state(db, key, ASSET_LOADED);
+    if (existing >= 0) {
+        UnloadWave(wave); /* caller handed over ownership */
+        ++db->sounds[existing].refcount;
+        return (mye_sound){ .index = (uint32_t)existing,
+                            .generation = db->sounds[existing].generation };
     }
 
-    int index = -1;
-    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
-        if (db->sounds[i].state == ASSET_EMPTY) {
-            index = i;
-            break;
-        }
-    }
+    int index = claim_index_for_sound(db, key);
     if (index < 0 || !db->audio_ready) {
         /* Headless or no device: the wave has nowhere to go. Callers get an
-         * invalid handle and the game runs silently rather than failing. */
+         * invalid handle and the game runs silently rather than failing.
+         *
+         * Deliberately NOT recorded as a failure: a missing audio device is a
+         * property of the world, not of the asset, and recording it would
+         * turn every headless run into a wall of failure records about
+         * sounds that are perfectly fine. */
         UnloadWave(wave);
         return (mye_sound){ 0 };
     }
@@ -705,6 +871,7 @@ mye_sound mye_sound_from_wave(ecs_world_t *world, const char *name, Wave wave)
     Sound sound = LoadSoundFromWave(wave);
     UnloadWave(wave);
     if (sound.frameCount == 0) {
+        record_sound_failure(db, key);
         return (mye_sound){ 0 };
     }
 
@@ -790,6 +957,158 @@ static music_slot *resolve_music(const mye_asset_db *db, mye_music handle)
     return slot;
 }
 
+/* ----------------------------------------------------------------- fonts -- */
+
+/* "<path>@<size>", truncated to a key. Composed by hand rather than with
+ * snprintf into a scratch buffer, because snprintf truncates the TAIL: an
+ * over-long path would lose the "@<size>" that is the whole point of the key,
+ * and two sizes of one font would collide in a single slot. Here the PATH
+ * gives way instead, which is also what copy_key does with a long key. */
+static void font_key(char *out, const char *path, int size)
+{
+    char suffix[24];
+    int written = snprintf(suffix, sizeof suffix, "@%d", size);
+    size_t suffix_len = written > 0 ? (size_t)written : 0;
+    if (suffix_len >= MYE_ASSET_KEY_MAX) {
+        suffix_len = MYE_ASSET_KEY_MAX - 1; /* unreachable; keeps the maths safe */
+    }
+
+    size_t room = MYE_ASSET_KEY_MAX - 1 - suffix_len;
+    size_t path_len = strlen(path);
+    if (path_len > room) {
+        path += path_len - room; /* keep the tail: the filename identifies it */
+        path_len = room;
+    }
+
+    memcpy(out, path, path_len);
+    memcpy(out + path_len, suffix, suffix_len);
+    out[path_len + suffix_len] = '\0';
+}
+
+static int find_font_in_state(const mye_asset_db *db, const char *key,
+                              asset_state state)
+{
+    for (int i = 0; i < MYE_MAX_FONTS; ++i) {
+        if (db->fonts[i].state == state &&
+            strcmp(db->fonts[i].key, key) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int find_free_font_slot(const mye_asset_db *db)
+{
+    int failed = -1;
+    for (int i = 0; i < MYE_MAX_FONTS; ++i) {
+        if (db->fonts[i].state == ASSET_EMPTY) {
+            return i;
+        }
+        if (failed < 0 && db->fonts[i].state == ASSET_FAILED) {
+            failed = i;
+        }
+    }
+    return failed;
+}
+
+/* See claim_index_for_texture. */
+static int claim_index_for_font(const mye_asset_db *db, const char *key)
+{
+    int retry = find_font_in_state(db, key, ASSET_FAILED);
+    return retry >= 0 ? retry : find_free_font_slot(db);
+}
+
+static void record_font_failure(mye_asset_db *db, const char *key)
+{
+    int index = find_font_in_state(db, key, ASSET_FAILED);
+    if (index < 0) {
+        index = find_free_font_slot(db);
+        if (index < 0) {
+            return;
+        }
+        mye_log_warn("assets: font '%s' failed to load", key);
+    }
+
+    font_slot *slot = &db->fonts[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_FAILED;
+    slot->refcount = 0;
+    slot->scope = db->scope;
+    slot->font = (Font){ 0 };
+    copy_key(slot->key, key);
+}
+
+static font_slot *resolve_font(const mye_asset_db *db, mye_font handle)
+{
+    if (db == NULL || handle.generation == 0 ||
+        handle.index >= MYE_MAX_FONTS) {
+        return NULL;
+    }
+    font_slot *slot = &db->fonts[handle.index];
+    if (slot->state != ASSET_LOADED || slot->generation != handle.generation) {
+        return NULL;
+    }
+    return slot;
+}
+
+static int find_music_in_state(const mye_asset_db *db, const char *key,
+                               asset_state state)
+{
+    for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
+        if (db->music[i].state == state &&
+            strcmp(db->music[i].key, key) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int find_free_music_slot(const mye_asset_db *db)
+{
+    int failed = -1;
+    for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
+        if (db->music[i].state == ASSET_EMPTY) {
+            return i;
+        }
+        if (failed < 0 && db->music[i].state == ASSET_FAILED) {
+            failed = i;
+        }
+    }
+    return failed;
+}
+
+/* See claim_index_for_texture. */
+static int claim_index_for_music(const mye_asset_db *db, const char *key)
+{
+    int retry = find_music_in_state(db, key, ASSET_FAILED);
+    return retry >= 0 ? retry : find_free_music_slot(db);
+}
+
+static void record_music_failure(mye_asset_db *db, const char *key)
+{
+    int index = find_music_in_state(db, key, ASSET_FAILED);
+    if (index < 0) {
+        index = find_free_music_slot(db);
+        if (index < 0) {
+            return;
+        }
+        mye_log_warn("assets: music '%s' failed to load", key);
+    }
+
+    music_slot *slot = &db->music[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_FAILED;
+    slot->refcount = 0;
+    slot->scope = db->scope;
+    slot->music = (Music){ 0 };
+    slot->wav_ctx = false;
+    copy_key(slot->key, key);
+}
+
 mye_music mye_music_load(ecs_world_t *world, const char *path)
 {
     mye_asset_db *db = db_get(world);
@@ -800,22 +1119,14 @@ mye_music mye_music_load(ecs_world_t *world, const char *path)
     char key[MYE_ASSET_KEY_MAX];
     copy_key(key, path);
 
-    for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
-        if (db->music[i].state == ASSET_LOADED &&
-            strcmp(db->music[i].key, key) == 0) {
-            ++db->music[i].refcount; /* dedupe: one decoder, one stream */
-            return (mye_music){ .index = (uint32_t)i,
-                                .generation = db->music[i].generation };
-        }
+    int existing = find_music_in_state(db, key, ASSET_LOADED);
+    if (existing >= 0) {
+        ++db->music[existing].refcount; /* dedupe: one decoder, one stream */
+        return (mye_music){ .index = (uint32_t)existing,
+                            .generation = db->music[existing].generation };
     }
 
-    int index = -1;
-    for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
-        if (db->music[i].state == ASSET_EMPTY) {
-            index = i;
-            break;
-        }
-    }
+    int index = claim_index_for_music(db, key);
     if (index < 0) {
         return (mye_music){ 0 };
     }
@@ -826,6 +1137,7 @@ mye_music mye_music_load(ecs_world_t *world, const char *path)
         if (!IsMusicValid(music)) {
             /* Missing file, or a format this raylib was not built with. The
              * failed load already freed whatever it had opened. */
+            record_music_failure(db, key);
             return (mye_music){ 0 };
         }
         /* raylib turns looping ON in every loader. The engine does not loop
@@ -834,7 +1146,9 @@ mye_music mye_music_load(ecs_world_t *world, const char *path)
         music.looping = false;
     } else if (!FileExists(path)) {
         /* Headless still refuses a path that is not there: a typo must fail
-         * in the silent test run, not only in the build with a sound card. */
+         * in the silent test run, not only in the build with a sound card --
+         * and it leaves the same failure record it would leave audibly. */
+        record_music_failure(db, key);
         return (mye_music){ 0 };
     }
 
@@ -851,6 +1165,30 @@ mye_music mye_music_load(ecs_world_t *world, const char *path)
 
     return (mye_music){ .index = (uint32_t)index,
                         .generation = slot->generation };
+}
+
+static mye_font claim_font_slot(mye_asset_db *db, const char *key, Font font)
+{
+    int index = claim_index_for_font(db, key);
+    if (index < 0) {
+        if (!db->headless && font.texture.id != 0) {
+            UnloadFont(font); /* registry full: do not leak the atlas */
+        }
+        return (mye_font){ 0 };
+    }
+
+    font_slot *slot = &db->fonts[index];
+    if (slot->generation == 0) {
+        slot->generation = GENERATION_START;
+    }
+    slot->state = ASSET_LOADED;
+    slot->refcount = 1;
+    slot->scope = db->scope;
+    slot->font = font;
+    copy_key(slot->key, key);
+
+    return (mye_font){ .index = (uint32_t)index,
+                       .generation = slot->generation };
 }
 
 const Music *mye_music_get(const ecs_world_t *world, mye_music handle)
@@ -884,6 +1222,109 @@ void mye_music_release(ecs_world_t *world, mye_music handle)
     ++slot->generation;
 }
 
+mye_font mye_font_load(ecs_world_t *world, const char *path, int size)
+{
+    mye_asset_db *db = db_get(world);
+    if (db == NULL || path == NULL) {
+        return (mye_font){ 0 };
+    }
+    if (size <= 0) {
+        size = MYE_FONT_DEFAULT_SIZE;
+    }
+
+    char key[MYE_ASSET_KEY_MAX];
+    font_key(key, path, size);
+
+    int existing = find_font_in_state(db, key, ASSET_LOADED);
+    if (existing >= 0) {
+        ++db->fonts[existing].refcount; /* same file AND same size */
+        return (mye_font){ .index = (uint32_t)existing,
+                           .generation = db->fonts[existing].generation };
+    }
+
+    int data_size = 0;
+    unsigned char *data = LoadFileData(path, &data_size);
+    if (data == NULL || data_size == 0) {
+        UnloadFileData(data);
+        record_font_failure(db, key);
+        return (mye_font){ 0 };
+    }
+
+    if (db->headless) {
+        /* Rasterise the glyphs on the CPU and throw them away, exactly as the
+         * headless texture path decodes an image for its dimensions: enough
+         * to know the file really is a font, without a GL context to upload
+         * an atlas into. */
+        int glyph_count = 0;
+        GlyphInfo *glyphs = LoadFontData(data, data_size, size, NULL, 0,
+                                         FONT_DEFAULT, &glyph_count);
+        UnloadFileData(data);
+        if (glyphs == NULL || glyph_count == 0) {
+            UnloadFontData(glyphs, glyph_count);
+            record_font_failure(db, key);
+            return (mye_font){ 0 };
+        }
+        UnloadFontData(glyphs, glyph_count);
+
+        Font fake = { .baseSize = size, .glyphCount = glyph_count };
+        return claim_font_slot(db, key, fake);
+    }
+
+    Font font = LoadFontFromMemory(GetFileExtension(path), data, data_size,
+                                   size, NULL, 0);
+    UnloadFileData(data);
+
+    /* raylib does not report a font it could not parse: LoadFontFromMemory
+     * hands back GetFontDefault() instead. Owning that would call UnloadFont
+     * on raylib's own font at release and blank every piece of text in the
+     * program, so the fallback is detected by identity and refused. */
+    if (!IsFontValid(font) || font.texture.id == 0 ||
+        font.texture.id == GetFontDefault().texture.id) {
+        record_font_failure(db, key);
+        return (mye_font){ 0 };
+    }
+    return claim_font_slot(db, key, font);
+}
+
+const Font *mye_font_get(const ecs_world_t *world, mye_font handle)
+{
+    const font_slot *slot = resolve_font(db_get(world), handle);
+    return slot != NULL ? &slot->font : NULL;
+}
+
+const Font *mye_font_get_or_placeholder(const ecs_world_t *world,
+                                        mye_font handle)
+{
+    mye_asset_db *db = db_get(world);
+    const font_slot *slot = resolve_font(db, handle);
+    if (slot != NULL) {
+        return &slot->font;
+    }
+    return (db != NULL && db->placeholder_font_ready) ? &db->placeholder_font
+                                                      : NULL;
+}
+
+bool mye_font_valid(const ecs_world_t *world, mye_font handle)
+{
+    return resolve_font(db_get(world), handle) != NULL;
+}
+
+void mye_font_release(ecs_world_t *world, mye_font handle)
+{
+    mye_asset_db *db = db_get(world);
+    font_slot *slot = resolve_font(db, handle);
+    if (slot == NULL || --slot->refcount > 0) {
+        return;
+    }
+    if (!db->headless && slot->font.texture.id != 0) {
+        UnloadFont(slot->font);
+    }
+    slot->state = ASSET_EMPTY;
+    slot->key[0] = '\0';
+    slot->font = (Font){ 0 };
+    ++slot->generation;
+}
+
 /* ---------------------------------------------------------------- scopes -- */
 
 void mye_assets_set_scope(ecs_world_t *world, uint32_t scope)
@@ -908,32 +1349,66 @@ void mye_assets_release_scope(ecs_world_t *world, uint32_t scope)
     }
 
     /* Release rather than unload outright: an asset another scope also asked
-     * for has a refcount above one and must survive. */
+     * for has a refcount above one and must survive.
+     *
+     * Failure records go too, rather than being released: a record of what
+     * this scene could not load is this scene's bookkeeping, and keeping it
+     * past the unload would make the count grow with every scene switch and
+     * name paths nothing is asking for any more. */
     for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
-        if (db->textures[i].state == ASSET_LOADED &&
-            db->textures[i].scope == scope) {
+        if (db->textures[i].scope != scope) {
+            continue;
+        }
+        if (db->textures[i].state == ASSET_LOADED) {
             mye_texture_release(world,
                                 (mye_texture){ .index = (uint32_t)i,
                                                .generation =
                                                    db->textures[i].generation });
+        } else if (db->textures[i].state == ASSET_FAILED) {
+            db->textures[i].state = ASSET_EMPTY;
+            db->textures[i].key[0] = '\0';
         }
     }
     for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
-        if (db->sounds[i].state == ASSET_LOADED &&
-            db->sounds[i].scope == scope) {
+        if (db->sounds[i].scope != scope) {
+            continue;
+        }
+        if (db->sounds[i].state == ASSET_LOADED) {
             mye_sound_release(world,
                               (mye_sound){ .index = (uint32_t)i,
                                            .generation =
                                                db->sounds[i].generation });
+        } else if (db->sounds[i].state == ASSET_FAILED) {
+            db->sounds[i].state = ASSET_EMPTY;
+            db->sounds[i].key[0] = '\0';
         }
     }
     for (int i = 0; i < MYE_MAX_MODELS; ++i) {
-        if (db->models[i].state == ASSET_LOADED &&
-            db->models[i].scope == scope) {
+        if (db->models[i].scope != scope) {
+            continue;
+        }
+        if (db->models[i].state == ASSET_LOADED) {
             mye_model_release(world,
                               (mye_model){ .index = (uint32_t)i,
                                            .generation =
                                                db->models[i].generation });
+        } else if (db->models[i].state == ASSET_FAILED) {
+            db->models[i].state = ASSET_EMPTY;
+            db->models[i].key[0] = '\0';
+        }
+    }
+    for (int i = 0; i < MYE_MAX_FONTS; ++i) {
+        if (db->fonts[i].scope != scope) {
+            continue;
+        }
+        if (db->fonts[i].state == ASSET_LOADED) {
+            mye_font_release(world,
+                             (mye_font){ .index = (uint32_t)i,
+                                         .generation =
+                                             db->fonts[i].generation });
+        } else if (db->fonts[i].state == ASSET_FAILED) {
+            db->fonts[i].state = ASSET_EMPTY;
+            db->fonts[i].key[0] = '\0';
         }
     }
     for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
@@ -943,6 +1418,10 @@ void mye_assets_release_scope(ecs_world_t *world, uint32_t scope)
                               (mye_music){ .index = (uint32_t)i,
                                            .generation =
                                                db->music[i].generation });
+        } else if (db->music[i].state == ASSET_FAILED &&
+                   db->music[i].scope == scope) {
+            db->music[i].state = ASSET_EMPTY;
+            db->music[i].key[0] = '\0';
         }
     }
 }
@@ -959,12 +1438,19 @@ mye_asset_stats mye_asset_stats_get(const ecs_world_t *world)
 
     for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
         if (db->textures[i].state == ASSET_LOADED) ++stats.textures_live;
+        if (db->textures[i].state == ASSET_FAILED) ++stats.assets_failed;
     }
     for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
         if (db->sounds[i].state == ASSET_LOADED) ++stats.sounds_live;
+        if (db->sounds[i].state == ASSET_FAILED) ++stats.assets_failed;
     }
     for (int i = 0; i < MYE_MAX_MODELS; ++i) {
         if (db->models[i].state == ASSET_LOADED) ++stats.models_live;
+        if (db->models[i].state == ASSET_FAILED) ++stats.assets_failed;
+    }
+    for (int i = 0; i < MYE_MAX_FONTS; ++i) {
+        if (db->fonts[i].state == ASSET_LOADED) ++stats.fonts_live;
+        if (db->fonts[i].state == ASSET_FAILED) ++stats.assets_failed;
     }
     for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
         if (db->music[i].state == ASSET_LOADED) ++stats.music_live;
@@ -975,6 +1461,61 @@ mye_asset_stats mye_asset_stats_get(const ecs_world_t *world)
 
 /* ------------------------------------------------------------- lifecycle -- */
 
+/* plan/06-assets.md: "debug builds report any handle still live at shutdown
+ * with the path that loaded it". The allocator's leak report says how many
+ * bytes went missing; this says which asset, which is the half you can act on.
+ *
+ * Unconditional rather than debug-only. It is one pass over the slot arrays,
+ * once, at a point where the program is exiting anyway -- and a shipped game
+ * that leaks a texture per scene transition has the same bug a debug build
+ * would, with fewer people watching.
+ *
+ * A warning, not an error: holding an asset for as long as the world lives is
+ * perfectly legitimate, and plenty of the engine's own tests do it. What the
+ * report catches is the scene that meant to release and did not.
+ *
+ * Adopted textures are left out: the registry never owned them (a canvas's
+ * colour attachment belongs to its RenderTexture2D), so it is in no position
+ * to call one a leak. */
+static void report_live_at_shutdown(const mye_asset_db *db)
+{
+    for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
+        if (db->textures[i].state == ASSET_LOADED && db->textures[i].owned) {
+            mye_log_warn("assets: texture '%s' still live at shutdown "
+                         "(refcount %u)",
+                         db->textures[i].key, db->textures[i].refcount);
+        }
+    }
+    for (int i = 0; i < MYE_MAX_SOUNDS; ++i) {
+        if (db->sounds[i].state == ASSET_LOADED) {
+            mye_log_warn("assets: sound '%s' still live at shutdown "
+                         "(refcount %u)",
+                         db->sounds[i].key, db->sounds[i].refcount);
+        }
+    }
+    for (int i = 0; i < MYE_MAX_MODELS; ++i) {
+        if (db->models[i].state == ASSET_LOADED) {
+            mye_log_warn("assets: model '%s' still live at shutdown "
+                         "(refcount %u)",
+                         db->models[i].key, db->models[i].refcount);
+        }
+    }
+    for (int i = 0; i < MYE_MAX_MUSIC; ++i) {
+        if (db->music[i].state == ASSET_LOADED) {
+            mye_log_warn("assets: music '%s' still live at shutdown "
+                         "(refcount %u)",
+                         db->music[i].key, db->music[i].refcount);
+        }
+    }
+    for (int i = 0; i < MYE_MAX_FONTS; ++i) {
+        if (db->fonts[i].state == ASSET_LOADED) {
+            mye_log_warn("assets: font '%s' still live at shutdown "
+                         "(refcount %u)",
+                         db->fonts[i].key, db->fonts[i].refcount);
+        }
+    }
+}
+
 /* Runs during ecs_fini, i.e. while the window and audio device are still up,
  * which is what UnloadTexture and UnloadSound require. */
 static void assets_fini(ecs_world_t *world, void *ctx)
@@ -984,6 +1525,8 @@ static void assets_fini(ecs_world_t *world, void *ctx)
     if (db == NULL) {
         return;
     }
+
+    report_live_at_shutdown(db);
 
     for (int i = 0; i < MYE_MAX_TEXTURES; ++i) {
         if (db->textures[i].state == ASSET_LOADED &&
@@ -1014,9 +1557,17 @@ static void assets_fini(ecs_world_t *world, void *ctx)
             }
         }
     }
+    for (int i = 0; i < MYE_MAX_FONTS; ++i) {
+        if (db->fonts[i].state == ASSET_LOADED && !db->headless &&
+            db->fonts[i].font.texture.id != 0) {
+            UnloadFont(db->fonts[i].font);
+        }
+    }
     if (db->placeholder_ready) {
         UnloadTexture(db->placeholder);
     }
+    /* placeholder_font is raylib's, unloaded by CloseWindow. Not ours to
+     * free -- see the field's declaration. */
     if (db->audio_ready) {
         CloseAudioDevice();
     }
@@ -1026,6 +1577,7 @@ static void assets_fini(ecs_world_t *world, void *ctx)
     MYE_DELETE_ARRAY(a, db->sounds, MYE_MAX_SOUNDS);
     MYE_DELETE_ARRAY(a, db->models, MYE_MAX_MODELS);
     MYE_DELETE_ARRAY(a, db->music, MYE_MAX_MUSIC);
+    MYE_DELETE_ARRAY(a, db->fonts, MYE_MAX_FONTS);
     MYE_DELETE(a, db);
 }
 
@@ -1048,12 +1600,14 @@ void MyeAssetsModuleImport(ecs_world_t *world)
     db->sounds = MYE_NEW_ARRAY(a, sound_slot, MYE_MAX_SOUNDS);
     db->models = MYE_NEW_ARRAY(a, model_slot, MYE_MAX_MODELS);
     db->music = MYE_NEW_ARRAY(a, music_slot, MYE_MAX_MUSIC);
+    db->fonts = MYE_NEW_ARRAY(a, font_slot, MYE_MAX_FONTS);
     if (db->textures == NULL || db->sounds == NULL || db->models == NULL ||
-        db->music == NULL) {
+        db->music == NULL || db->fonts == NULL) {
         MYE_DELETE_ARRAY(a, db->textures, MYE_MAX_TEXTURES);
         MYE_DELETE_ARRAY(a, db->sounds, MYE_MAX_SOUNDS);
         MYE_DELETE_ARRAY(a, db->models, MYE_MAX_MODELS);
         MYE_DELETE_ARRAY(a, db->music, MYE_MAX_MUSIC);
+        MYE_DELETE_ARRAY(a, db->fonts, MYE_MAX_FONTS);
         MYE_DELETE(a, db);
         ecs_singleton_set(world, MyeAssets, { .db = NULL });
         return;
@@ -1068,6 +1622,12 @@ void MyeAssetsModuleImport(ecs_world_t *world)
         db->placeholder = LoadTextureFromImage(placeholder);
         UnloadImage(placeholder);
         db->placeholder_ready = db->placeholder.id != 0;
+
+        /* raylib loaded its built-in font during InitWindow. Borrowed as the
+         * font placeholder so text with a missing font still reads on screen,
+         * and so a zeroed mye_font means "the default font". */
+        db->placeholder_font = GetFontDefault();
+        db->placeholder_font_ready = db->placeholder_font.texture.id != 0;
 
         InitAudioDevice();
         db->audio_ready = IsAudioDeviceReady();

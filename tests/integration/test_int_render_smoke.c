@@ -8,6 +8,7 @@
 #include "core/engine.h"
 #include "render/camera.h"
 #include "render/render3d.h"
+#include "render/text.h"
 #include "scene/transform.h"
 #include "mye_test.h"
 
@@ -71,10 +72,27 @@ TEST(renders_frames_and_shuts_down_clean)
                                          GenMeshCube(1.0f, 1.0f, 1.0f), WHITE);
     mye_mesh_spawn(world, cube, (Vector3){ 0.0f, 0.5f, 0.0f }, SKYBLUE);
 
+    /* Both text passes through real GL. The default font is a GPU atlas, so
+     * this is the only place DrawTextEx is actually called: the headless text
+     * test can cover ownership but not drawing. The world-space one goes
+     * through the 2D camera loop, the screen-space one through MyeOnDrawUI. */
+    ecs_entity_t hud = mye_text_spawn(world, "smoke", 8.0f, 40.0f, RAYWHITE);
+    ecs_entity_t label = mye_text_spawn(world, "in world", 0.0f, 0.0f, YELLOW);
+    MyeText *world_text = ecs_get_mut(world, label, MyeText);
+    world_text->world_space = true;
+    ecs_modified(world, label, MyeText);
+
     frames_drawn = 0;
     while (mye_running(world)) {
         mye_progress(world, GetFrameTime());
+        /* Set every frame, so the string is replaced while the draw systems
+         * are reading it -- the ordering the copy hook has to get right. */
+        mye_text_set(world, hud, TextFormat("frame %d", frames_drawn));
     }
+
+    /* Measuring needs the real atlas, so unlike headless this is non-zero. */
+    Vector2 measured = mye_text_measure(world, ecs_get(world, hud, MyeText));
+    ASSERT_TRUE(measured.x > 0.0f && measured.y > 0.0f);
 
     /* max_frames stopped the loop, and drawing actually happened. */
     ASSERT_EQ_INT(FRAMES, frames_drawn);
