@@ -1,6 +1,6 @@
 # 04 — Memory & Allocators
 
-> **Status: implemented** (M1) — `engine/core/alloc.[ch]`, 18 unit tests in
+> **Status: implemented** (M1) — `engine/core/alloc.[ch]`, unit tests in
 > `tests/unit/test_alloc.c`.
 
 ## The engine rule
@@ -34,7 +34,7 @@ allocations are visible to our tracking layer.
 |---|---|---|
 | **Heap** | Startup and long-lived data. `aligned_alloc`/`free` behind the interface. | `mye_heap_allocator()` |
 | **Arena (bump)** | Scene lifetime data: load a scene into an arena, drop the whole arena on unload. Doubles as the frame allocator when reset each frame. | `mye_arena_init(&a, backing, bytes)` · `mye_arena_reset` · `mye_arena_take_mark`/`mye_arena_rewind` · `mye_arena_allocator(&a)` |
-| **Pool** | Many same-size objects with churn (particles, audio voices, asset slots). O(1) alloc/free via an intrusive free list. | `mye_pool_init(&p, backing, elem_size, elem_align, count)` · `mye_pool_alloc`/`_free` · `mye_pool_owns` |
+| **Pool** | Many same-size objects with churn (particles, audio voices, asset slots). O(1) alloc/free via an intrusive free list; double frees are detected by a per-block liveness bit, refused, and counted. | `mye_pool_init(&p, backing, elem_size, elem_align, count)` · `mye_pool_alloc`/`_free` · `mye_pool_owns` · `mye_pool_double_frees` |
 | **Tracking** | Debug decorator over any of the above: counts, peak, leak detection. | `mye_tracking_init(&t, backing)` · `mye_tracking_has_leaks` · `mye_tracking_report` |
 
 Every backend exposes itself as the same by-value handle, so code takes "an
@@ -151,8 +151,14 @@ actually in force.
 
 ## Milestone & testing
 
-Allocators land in **M3** ([07-roadmap.md](07-roadmap.md)) with full unit
-tests: alignment, exhaustion → `NULL`, reset semantics, pool reuse patterns,
-tracking counts, leak detection — all headless, all under ASan/UBSan
-([09-testing.md](09-testing.md)). Until M3, engine code uses plain
-`malloc`/`free` behind the `mye_allocator` interface so the swap is painless.
+Allocators landed first, in **M1** ([07-roadmap.md](07-roadmap.md)) — the
+rule they enforce is cheap from the first line of engine code and expensive
+to retrofit. The unit tests in `tests/unit/test_alloc.c` are headless and run
+under ASan/UBSan and TSan ([09-testing.md](09-testing.md)): alignment
+(including from a deliberately misaligned base), exhaustion → `NULL`,
+overflow-sized requests, reset/mark/rewind semantics, failed-resize
+ownership, the generic resize fallback, pool reuse, stride and ownership
+checks, the header adapters (alone, composed with arenas and pools, and
+balancing in tracking), tracking counts and leak detection, and a
+multi-thread test that drives the tracking allocator's atomic counters from
+several threads at once.

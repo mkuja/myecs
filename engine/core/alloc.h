@@ -14,6 +14,12 @@
  * arenas and pools store zero per-allocation metadata, and lets the tracking
  * allocator account bytes exactly without headers. Callers always know the
  * size -- it is sizeof(T) or the capacity they asked for.
+ *
+ * Thread safety: the heap backend is safe from any thread, and the tracking
+ * wrapper is as safe as whatever it wraps (its counters are atomic). Arenas
+ * and pools are NOT synchronised -- confine each to one thread or guard it
+ * with a mutex. The engine's frame arena is main-thread only for exactly
+ * this reason (see core/engine.h).
  */
 #ifndef MYE_CORE_ALLOC_H
 #define MYE_CORE_ALLOC_H
@@ -45,19 +51,36 @@ typedef struct mye_allocator {
 
 void *mye_alloc(mye_allocator a, size_t size, size_t align);
 void *mye_alloc_zeroed(mye_allocator a, size_t size, size_t align);
+/* Grow or shrink `ptr` (NULL: plain alloc) to `new_size`. Three outcomes:
+ * success returns the block, possibly moved, contents preserved up to
+ * min(old_size, new_size); `new_size == 0` FREES `ptr` and returns NULL,
+ * which is not a failure; any other NULL is a failure and `ptr` is untouched,
+ * still owned by the caller. Tell the last two apart by `new_size`.
+ * `old_size` must be the block's allocated size -- zero with a non-NULL
+ * `ptr` is refused (a live block cannot be zero-sized). */
 void *mye_resize(mye_allocator a, void *ptr, size_t old_size, size_t new_size,
                  size_t align);
 void mye_free(mye_allocator a, void *ptr, size_t size);
+
+/* Array forms with the elem_size * count multiply overflow-checked: a
+ * product that would wrap yields NULL / a no-op instead of a wrong size.
+ * These back MYE_NEW_ARRAY / MYE_DELETE_ARRAY. */
+void *mye_alloc_array_zeroed(mye_allocator a, size_t elem_size, size_t count,
+                             size_t align);
+void mye_free_array(mye_allocator a, void *ptr, size_t elem_size, size_t count);
 
 /* True if the allocator is usable (has a vtable). */
 bool mye_allocator_valid(mye_allocator a);
 
 #define MYE_NEW(a_, T_) ((T_ *)mye_alloc_zeroed((a_), sizeof(T_), _Alignof(T_)))
+/* The array macros overflow-check sizeof(T_) * n_: a product that would
+ * wrap makes MYE_NEW_ARRAY return NULL and MYE_DELETE_ARRAY do nothing. */
 #define MYE_NEW_ARRAY(a_, T_, n_)                                              \
-    ((T_ *)mye_alloc_zeroed((a_), sizeof(T_) * (size_t)(n_), _Alignof(T_)))
+    ((T_ *)mye_alloc_array_zeroed((a_), sizeof(T_), (size_t)(n_),              \
+                                  _Alignof(T_)))
 #define MYE_DELETE(a_, p_) mye_free((a_), (p_), sizeof *(p_))
 #define MYE_DELETE_ARRAY(a_, p_, n_)                                           \
-    mye_free((a_), (p_), sizeof *(p_) * (size_t)(n_))
+    mye_free_array((a_), (p_), sizeof *(p_), (size_t)(n_))
 
 /* Round `value` up to a multiple of `align` (power of two). Saturates to
  * SIZE_MAX on overflow so callers can detect it. */
@@ -121,7 +144,9 @@ size_t mye_arena_used(const mye_arena *arena);
 size_t mye_arena_capacity(const mye_arena *arena);
 size_t mye_arena_high_water(const mye_arena *arena);
 
-/* Scratch usage: take a mark, allocate freely, rewind back to the mark. */
+/* Scratch usage: take a mark, allocate freely, rewind back to the mark.
+ * Rewinding to a mark taken before a reset (one beyond the current `used`)
+ * is ignored rather than moving the bump pointer forward. */
 typedef size_t mye_arena_mark;
 mye_arena_mark mye_arena_take_mark(const mye_arena *arena);
 void mye_arena_rewind(mye_arena *arena, mye_arena_mark mark);
@@ -133,6 +158,8 @@ void mye_arena_rewind(mye_arena *arena, mye_arena_mark mark);
 typedef struct mye_pool {
     uint8_t *blocks;
     void *free_list;
+    uint8_t *live_bits;  /* one bit per block, set while handed out */
+    size_t double_frees; /* second frees detected and refused */
     size_t stride;   /* bytes per block, >= elem_size, aligned */
     size_t capacity; /* number of blocks */
     size_t live;     /* blocks currently handed out */
@@ -147,12 +174,19 @@ void mye_pool_deinit(mye_pool *pool);
 mye_allocator mye_pool_allocator(mye_pool *pool);
 
 void *mye_pool_alloc(mye_pool *pool); /* NULL when exhausted */
+/* Freeing NULL or a pointer the pool does not own is a safe no-op. Freeing a
+ * live block TWICE is detected by the per-block liveness bit: the second
+ * free is refused -- the free list stays intact -- and counted, so a test
+ * can assert mye_pool_double_frees() == 0 the way it asserts on tracking
+ * leaks. */
 void mye_pool_free(mye_pool *pool, void *ptr);
 void mye_pool_reset(mye_pool *pool); /* frees every block at once */
 
 size_t mye_pool_live(const mye_pool *pool);
 size_t mye_pool_capacity(const mye_pool *pool);
 size_t mye_pool_peak(const mye_pool *pool);
+/* Refused double frees since init. A lifetime statistic: reset keeps it. */
+size_t mye_pool_double_frees(const mye_pool *pool);
 /* True if `ptr` points at a block owned by this pool and correctly aligned. */
 bool mye_pool_owns(const mye_pool *pool, const void *ptr);
 

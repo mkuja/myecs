@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <malloc.h> /* _aligned_malloc / _aligned_free */
+#endif
+
 /* ------------------------------------------------------------- helpers -- */
 
 static bool is_power_of_two(size_t v)
@@ -52,8 +56,13 @@ void *mye_resize(mye_allocator a, void *ptr, size_t old_size, size_t new_size,
     if (!mye_allocator_valid(a) || !is_power_of_two(align)) {
         return NULL;
     }
-    if (ptr == NULL || old_size == 0) {
+    if (ptr == NULL) {
         return mye_alloc(a, new_size, align);
+    }
+    if (old_size == 0) {
+        /* A live block cannot be zero-sized; allocating fresh here would
+         * silently abandon `ptr`. Refuse instead: NULL, ptr untouched. */
+        return NULL;
     }
     if (new_size == 0) {
         mye_free(a, ptr, old_size);
@@ -78,6 +87,36 @@ void mye_free(mye_allocator a, void *ptr, size_t size)
         return;
     }
     a.vt->release(a.ctx, ptr, size);
+}
+
+static bool array_size(size_t elem_size, size_t count, size_t *out_size)
+{
+    /* elem_size 0 is refused on both paths: the alloc could only return
+     * NULL anyway, and a size-0 free would desync tracking's byte count. */
+    if (elem_size == 0 || count > SIZE_MAX / elem_size) {
+        return false;
+    }
+    *out_size = elem_size * count;
+    return true;
+}
+
+void *mye_alloc_array_zeroed(mye_allocator a, size_t elem_size, size_t count,
+                             size_t align)
+{
+    size_t size = 0;
+    if (!array_size(elem_size, count, &size)) {
+        return NULL;
+    }
+    return mye_alloc_zeroed(a, size, align);
+}
+
+void mye_free_array(mye_allocator a, void *ptr, size_t elem_size, size_t count)
+{
+    size_t size = 0;
+    if (!array_size(elem_size, count, &size)) {
+        return; /* the checked alloc never handed out such a block */
+    }
+    mye_free(a, ptr, size);
 }
 
 /* ---------------------------------------------------- header adapters -- */
@@ -170,6 +209,11 @@ void mye_free_hdr(mye_allocator a, void *ptr)
 
 /* ---------------------------------------------------------------- heap -- */
 
+/* On Windows, MSVC's UCRT has no C11 aligned_alloc -- its free() cannot
+ * release aligned blocks -- so the _aligned_* pair must be used TOGETHER:
+ * swapping only one side corrupts the heap. That is why alloc and release
+ * switch on the same condition. (Untested here: no Windows toolchain in the
+ * build matrix; see plan/08-build.md.) */
 static void *heap_alloc(void *ctx, size_t size, size_t align)
 {
     (void)ctx;
@@ -178,7 +222,22 @@ static void *heap_alloc(void *ctx, size_t size, size_t align)
     if (padded == SIZE_MAX) {
         return NULL;
     }
+#if defined(_WIN32)
+    return _aligned_malloc(padded, align);
+#else
     return aligned_alloc(align, padded);
+#endif
+}
+
+static void heap_release(void *ctx, void *ptr, size_t size)
+{
+    (void)ctx;
+    (void)size;
+#if defined(_WIN32)
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
 }
 
 static void *heap_resize(void *ctx, void *ptr, size_t old_size, size_t new_size,
@@ -190,15 +249,8 @@ static void *heap_resize(void *ctx, void *ptr, size_t old_size, size_t new_size,
         return NULL;
     }
     memcpy(fresh, ptr, old_size < new_size ? old_size : new_size);
-    free(ptr);
+    heap_release(ctx, ptr, old_size);
     return fresh;
-}
-
-static void heap_release(void *ctx, void *ptr, size_t size)
-{
-    (void)ctx;
-    (void)size;
-    free(ptr);
 }
 
 static const mye_allocator_vtable heap_vtable = {
@@ -220,11 +272,14 @@ mye_allocator mye_heap_allocator(void)
 static bool arena_is_top(const mye_arena *arena, const uint8_t *p, size_t size,
                          size_t *out_offset)
 {
-    if (arena->base == NULL || p < arena->base ||
-        p > arena->base + arena->used) {
+    /* Compare as integers: `p` may be a foreign pointer, and relational
+     * pointer comparison is only defined within one object. */
+    uintptr_t up = (uintptr_t)p;
+    uintptr_t base = (uintptr_t)arena->base;
+    if (arena->base == NULL || up < base || up > base + arena->used) {
         return false;
     }
-    size_t offset = (size_t)(p - arena->base); /* offset <= used */
+    size_t offset = (size_t)(up - base); /* offset <= used */
     *out_offset = offset;
     return arena->used - offset == size;
 }
@@ -271,8 +326,12 @@ static void *arena_resize(void *ctx, void *ptr, size_t old_size,
     size_t offset = 0;
 
     /* Growing the topmost allocation extends in place -- the common case for
-     * a dynamic array built up inside a scratch region. */
-    if (arena_is_top(arena, p, old_size, &offset)) {
+     * a dynamic array built up inside a scratch region. Only when the block
+     * already sits on the requested alignment: a resize may ask for stricter
+     * alignment than the original allocation had, and handing the old
+     * address back would violate it. */
+    if (arena_is_top(arena, p, old_size, &offset) &&
+        ((uintptr_t)ptr & ((uintptr_t)align - 1)) == 0) {
         if (new_size > arena->capacity - offset) {
             return NULL;
         }
@@ -430,10 +489,21 @@ bool mye_pool_init(mye_pool *pool, mye_allocator backing, size_t elem_size,
     if (blocks == NULL) {
         return false;
     }
+    /* One liveness bit per block, so a double free is detected instead of
+     * silently corrupting the free list. capacity <= SIZE_MAX / stride, so
+     * the + 7 cannot wrap. */
+    uint8_t *live_bits =
+        (uint8_t *)mye_alloc_zeroed(backing, (capacity + 7) / 8, 1);
+    if (live_bits == NULL) {
+        mye_free(backing, blocks, stride * capacity);
+        return false;
+    }
 
     *pool = (mye_pool){
         .blocks = (uint8_t *)blocks,
         .free_list = NULL,
+        .live_bits = live_bits,
+        .double_frees = 0,
         .stride = stride,
         .capacity = capacity,
         .live = 0,
@@ -449,6 +519,9 @@ void mye_pool_deinit(mye_pool *pool)
 {
     assert(pool != NULL);
     if (pool->blocks != NULL) {
+        /* Reverse allocation order: live_bits was allocated after blocks,
+         * and a LIFO backing (an arena) only reclaims the topmost block. */
+        mye_free(pool->backing, pool->live_bits, (pool->capacity + 7) / 8);
         mye_free(pool->backing, pool->blocks, pool->stride * pool->capacity);
     }
     *pool = (mye_pool){ 0 };
@@ -470,6 +543,9 @@ void mye_pool_reset(mye_pool *pool)
         memcpy(block, &pool->free_list, sizeof(void *));
         pool->free_list = block;
     }
+    if (pool->capacity != 0) {
+        memset(pool->live_bits, 0, (pool->capacity + 7) / 8);
+    }
     pool->live = 0;
 }
 
@@ -483,6 +559,12 @@ void *mye_pool_alloc(mye_pool *pool)
     void *next = NULL;
     memcpy(&next, block, sizeof(void *));
     pool->free_list = next;
+    size_t index = (size_t)((uint8_t *)block - pool->blocks) / pool->stride;
+    /* Bounded, so a free list poisoned by a caller's use-after-free write
+     * cannot make the allocator itself scribble outside live_bits. */
+    if (index < pool->capacity) {
+        pool->live_bits[index / 8] |= (uint8_t)(1u << (index % 8));
+    }
     ++pool->live;
     if (pool->live > pool->peak) {
         pool->peak = pool->live;
@@ -503,6 +585,17 @@ void mye_pool_free(mye_pool *pool, void *ptr)
     if (!mye_pool_owns(pool, ptr)) {
         return;
     }
+    size_t index = (size_t)((uint8_t *)ptr - pool->blocks) / pool->stride;
+    uint8_t mask = (uint8_t)(1u << (index % 8));
+    if ((pool->live_bits[index / 8] & mask) == 0) {
+        /* Double free (or free of a never-allocated slot): pushing it again
+         * would thread a cycle into the free list and hand one block to two
+         * callers. Refuse and count, so tests can fail on the count the way
+         * they fail on tracking leaks. */
+        ++pool->double_frees;
+        return;
+    }
+    pool->live_bits[index / 8] &= (uint8_t)~mask;
     memcpy(ptr, &pool->free_list, sizeof(void *));
     pool->free_list = ptr;
     --pool->live;
@@ -511,18 +604,22 @@ void mye_pool_free(mye_pool *pool, void *ptr)
 size_t mye_pool_live(const mye_pool *pool) { return pool->live; }
 size_t mye_pool_capacity(const mye_pool *pool) { return pool->capacity; }
 size_t mye_pool_peak(const mye_pool *pool) { return pool->peak; }
+size_t mye_pool_double_frees(const mye_pool *pool) { return pool->double_frees; }
 
 bool mye_pool_owns(const mye_pool *pool, const void *ptr)
 {
     if (pool->blocks == NULL || ptr == NULL) {
         return false;
     }
-    const uint8_t *p = (const uint8_t *)ptr;
-    const uint8_t *end = pool->blocks + pool->stride * pool->capacity;
-    if (p < pool->blocks || p >= end) {
+    /* Compare as integers: `ptr` may be a foreign pointer, and relational
+     * pointer comparison is only defined within one object. */
+    uintptr_t p = (uintptr_t)ptr;
+    uintptr_t begin = (uintptr_t)pool->blocks;
+    uintptr_t end = begin + pool->stride * pool->capacity;
+    if (p < begin || p >= end) {
         return false;
     }
-    return (size_t)(p - pool->blocks) % pool->stride == 0;
+    return (size_t)(p - begin) % pool->stride == 0;
 }
 
 /* ------------------------------------------------------------ tracking -- */
@@ -565,6 +662,9 @@ static void *tracking_resize(void *ctx, void *ptr, size_t old_size,
         atomic_fetch_add_explicit(&t->failed_allocs, 1, memory_order_relaxed);
         return NULL;
     }
+    /* new_size - old_size deliberately wraps when shrinking: adding the
+     * wrapped value is exact modular subtraction. Correct ONLY while these
+     * counters stay unsigned. */
     size_t live = atomic_fetch_add_explicit(&t->live_bytes,
                                             new_size - old_size,
                                             memory_order_relaxed) +

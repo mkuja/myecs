@@ -415,18 +415,44 @@ Interpolation is 2D-only: `MyeInterpolate` records `prev_x` and `prev_y`, and
 
 ## 6. Allocators
 
-**What it is.** Every engine interface that allocates takes a `mye_allocator`:
-a vtable plus a context, passed **by value**. Four backends ship: heap, arena,
-pool, and a tracking wrapper.
+**What it is.** When a program needs memory whose amount is only known while
+it is running — a score string, an array sized by how many entities exist —
+it has to ask for that memory at run time. Plain C answers with `malloc` and
+`free`: one anonymous global service that hands out blocks and takes them
+back one by one, in any order, forever.
 
-**Why it is.** Two reasons, and the second is the real one.
+An **allocator** is that same idea turned into a *value you can hand around*:
+"a thing you ask for memory, and give it back to". In this engine that value
+is `mye_allocator` — two pointers, passed **by value** — and every engine
+interface that allocates takes one. No engine code calls `malloc` directly.
+Four backends ship behind the same handle: heap, arena, pool, and a tracking
+wrapper.
 
-1. Different lifetimes want different strategies. Per-frame scratch should cost
-   a pointer bump and be freed all at once. Fixed-size objects churned every
-   frame want a free list, not `malloc`.
-2. **It makes leaks a test failure.** In Debug the engine wraps its allocator
-   in the tracking allocator, so `mye_shutdown` returns non-zero if anything is
-   still live. You find out from `ctest`, not from a profiler six months later.
+**Why it is.** Why not just call `malloc` everywhere, like most C programs?
+Two reasons, and the second is the real one.
+
+1. **Games allocate in patterns, and `malloc` serves none of them well.**
+   `malloc` pays for its generality (any size, any order, any lifetime) in
+   speed and fragmentation. Almost everything a game allocates falls into a
+   simpler pattern with a faster tool:
+
+   | The pattern | Example | The right tool |
+   |---|---|---|
+   | lives exactly one frame | text built for the HUD | arena, reset each frame |
+   | lives until the scene unloads | level data, loaded assets | arena, dropped wholesale |
+   | thousands of same-size objects, constant churn | particles, projectiles | pool of fixed slots |
+
+   An arena "frees" a million allocations by setting one integer to zero. A
+   pool allocates and frees in a few instructions with zero fragmentation,
+   forever. Because every interface takes *an allocator* rather than calling
+   `malloc`, handing a subsystem one of these is a call-site change, not a
+   rewrite.
+
+2. **It makes leaks a test failure.** Memory handed out by an allocator you
+   were given is memory someone can *count*. In Debug the engine wraps its
+   allocator in the tracking wrapper, so `mye_shutdown` returns non-zero if
+   anything is still live. You find out from `ctest`, not from a profiler six
+   months later.
 
 Note that free takes the size back:
 
@@ -440,10 +466,47 @@ For the cases that genuinely do not — C libraries that call `free(p)` with no
 size — there is a header-carrying adapter (`mye_alloc_hdr` and friends), which
 is how raylib's allocations are routed through our tracking.
 
+### The four backends
+
+Each in one sentence:
+
+- **Heap** (`mye_heap_allocator()`) — `malloc` behind the interface; the
+  general-purpose choice for startup and long-lived data, safe from any
+  thread.
+- **Arena** (`mye_arena_*`) — grabs one block up front and hands out slices
+  by advancing a pointer; you free the *whole arena* at once with `reset`,
+  not the slices, and when the block runs out you get NULL. The *frame
+  allocator* below is one of these, owned by the engine.
+- **Pool** (`mye_pool_*`) — one block cut into equal-size slots with a free
+  list threaded through them; alloc and free are O(1) pointer swaps, and
+  nothing fragments because every slot is the same size.
+- **Tracking** (`mye_tracking_*`) — not a source of memory at all: a wrapper
+  that forwards to any other allocator and counts what passes through (live,
+  peak, failed). This is what Debug builds wrap the engine allocator in.
+
 ### The frame allocator
 
-The one you will use most. A bump arena, reset at the top of every frame:
-allocate, use it this frame, never free it.
+The one you will use most — and not a fifth backend: it is an **arena the
+engine owns for you**, created at startup and reset at the start of every
+frame before any system allocates from it. `mye_frame_allocator(it->world)`
+hands you its allocator from inside any (main-thread) system.
+
+The problem it solves: a frame is full of tiny temporaries. Format a HUD
+string, build a list of draw commands to sort, assemble a debug line — data
+you need for the rest of *this* frame and never again. Doing that with
+`malloc` means thousands of alloc/free pairs per second, and one forgotten
+`free` is a leak. Doing it with the frame allocator means **allocate, use,
+walk away**:
+
+- You never free a frame allocation. There is no call to make and nothing to
+  forget.
+- The reset at the start of the next frame reclaims *everything* at once, by
+  setting one integer back to zero. Cost does not depend on how much you
+  allocated.
+- The price is the lifetime: a frame allocation is garbage the moment the
+  next frame begins. Anything a later frame will read — component data,
+  assets, anything persistent — belongs to a longer-lived allocator, never
+  this one. Copy out what must survive.
 
 ```c file
 static void DrawHud(ecs_iter_t *it)
@@ -459,9 +522,11 @@ static void DrawHud(ecs_iter_t *it)
 }
 ```
 
-Set the capacity with `frame_arena_bytes`. Running out returns `NULL` rather
-than growing, so a runaway allocation shows up as a missing HUD line instead of
-silently eating memory.
+Set the capacity with `frame_arena_bytes` (1 MB unless you say otherwise).
+Running out returns `NULL` rather than growing, so a runaway allocation shows
+up as a missing HUD line instead of silently eating memory — and the F3
+overlay (§19) shows the arena's high-water mark against its capacity, so you
+can see headroom shrinking before it runs out.
 
 **The frame arena is a bump pointer with no synchronisation.** Never touch it
 from a multi-threaded system (§17).
@@ -497,6 +562,24 @@ if (mye_tracking_has_leaks(&track)) mye_tracking_report(&track, "assets");
 
 `mye_arena_take_mark` / `mye_arena_rewind` give you a savepoint inside an arena
 — useful for "try to build this, abandon it if it does not fit".
+
+### Rules that keep you out of trouble
+
+- **Free with the size you allocated.** The interface trusts it; the
+  `MYE_DELETE` / `MYE_DELETE_ARRAY` macros supply it for you.
+- **Arenas and pools belong to one thread.** Heap and tracking are safe from
+  any thread; arena and pool are not synchronised. The frame arena is
+  main-thread only (§17).
+- **Never free a pool block twice.** The pool detects it with a per-block
+  liveness bit, refuses the second free, and counts it —
+  `mye_pool_double_frees()` is to double frees what
+  `mye_tracking_has_leaks()` is to leaks: assert it is zero in tests.
+- **Do not mix the free families.** Blocks from `mye_alloc_hdr` are freed
+  with `mye_free_hdr`; blocks from `mye_alloc` with `mye_free`. Each stores
+  its bookkeeping differently, so crossing them corrupts the heap.
+- **Every allocation can fail.** NULL comes back when the heap is out, the
+  arena is full, or the pool is empty. Engine startup treats that as fatal;
+  gameplay code should degrade, like the HUD example above.
 
 ---
 
