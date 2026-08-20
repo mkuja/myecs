@@ -1,7 +1,11 @@
 # 10 — WebAssembly (browser) support
 
-> **Status: planned, not started.** Scheduled as **M8**, after M7. See
-> [07-roadmap.md](07-roadmap.md).
+> **Status: shipped (M8).** Examples build and run in a browser, the
+> development loop and both hot-reload tiers exist, and `tools/check.sh`
+> compiles the web target. One promise below was deliberately dropped:
+> `mye_run()` and the loop inversion, superseded by the ASYNCIFY decision in
+> [11-web-dev-loop.md](11-web-dev-loop.md) — see §1. Still out of scope:
+> WebGL 1 and pthreads. See [07-roadmap.md](07-roadmap.md).
 
 ## Verdict: feasible, and both foundations already support it
 
@@ -39,10 +43,13 @@ emscripten_set_main_loop_arg(web_frame, world, 0, 1);
 `emscripten_set_main_loop_arg` on web, so a game's `main()` is identical on
 both. Worth doing *before* there are many examples to convert.
 
-**Revised**: `-sASYNCIFY` keeps the `while` loop unmodified at the cost of
-binary size and some runtime overhead. That is now the recommended *starting*
-point -- it gets a browser build working with zero engine changes, and the
-inversion can follow once its cost is measured. See
+**Revised, and this is what shipped**: `-sASYNCIFY` keeps the `while` loop
+unmodified at the cost of binary size and some runtime overhead. Every example
+runs in a browser with its `main()` untouched, so `mye_run()` was never added
+and the inversion never happened: its cost has not been measured to matter,
+and the one suspected ASYNCIFY failure turned out to be the measurement rather
+than the engine ([WEB-LOOP-STALL.md](WEB-LOOP-STALL.md)). The M8 bullet below
+that promises the conversion is therefore superseded. See
 [11-web-dev-loop.md](11-web-dev-loop.md).
 
 ### 2. Threads are cross-origin-isolated or absent
@@ -82,19 +89,24 @@ see [06-assets.md](06-assets.md) for why, and for what it would take back.)
 | Exit | `mye_shutdown` never runs in the callback model — leak reporting needs an explicit "quit" path or `emscripten_cancel_main_loop` |
 | Window size | canvas-driven; `SetWindowSize` and fullscreen behave differently |
 
-## Proposed milestone
+## The milestone, as delivered
 
 **M8 — Web build**, after M7:
 
-1. Install emscripten SDK; add a `cmake/MyeWeb.cmake` toolchain path and
-   document `emcmake cmake -S . -B build/web`.
-2. Introduce `mye_run(world, frame_fn)` and convert all examples to it
-   (desktop behaviour unchanged, verified by the existing suites).
-3. Build `example_02_asteroids` for the web, single-threaded, no preloaded
-   assets. Serve it locally and confirm it plays.
-4. Add a script that at minimum *compiles* the web target, so desktop work
-   cannot silently break it. (No CI -- see [09-testing.md](09-testing.md).)
+1. ~~Install emscripten SDK; add a `cmake/MyeWeb.cmake` toolchain path and
+   document `emcmake cmake -S . -B build/web`.~~
+2. ~~Introduce `mye_run(world, frame_fn)` and convert all examples to it.~~
+   **Dropped**, superseded by ASYNCIFY -- see §1. Every example's `main()` is
+   the same on both targets *without* the conversion, which was the point of
+   the exercise.
+3. ~~Build `example_02_asteroids` for the web, single-threaded, no preloaded
+   assets. Serve it locally and confirm it plays.~~ (Every example builds;
+   only the showcase preloads anything.)
+4. ~~Add a script that at minimum *compiles* the web target, so desktop work
+   cannot silently break it.~~ `tools/check.sh` does, guarded by `emcc` being
+   on PATH. (No CI -- see [09-testing.md](09-testing.md).)
 5. Document the COOP/COEP requirement if and when threads are enabled.
+   `tools/web_dev.py` already sends both headers; threads remain off.
 
 **Definition of done:** Asteroids runs in a browser at 60 fps with sound, from
 a single `emcmake` build, and the desktop suites are untouched and green.

@@ -46,6 +46,23 @@ if [[ "$quick" != "--quick" ]]; then
     run_config "ThreadSanitizer" build/tsan "-LE render" \
         -DCMAKE_BUILD_TYPE=Debug -DMYE_SANITIZE_THREAD=ON
 
+    # The web target is built from the same sources, so desktop work can break
+    # it without anyone noticing until the next by-hand build. One example is
+    # enough: it links the whole engine, the shell page and the web-only
+    # files. Compile errors fail the check; nothing here runs a browser.
+    step "WebAssembly build"
+    if command -v emcc > /dev/null 2>&1; then
+        if emcmake cmake -S . -B build/web -DCMAKE_BUILD_TYPE=Release \
+               > /dev/null; then
+            cmake --build build/web -j"$jobs" --target example_02_asteroids \
+                || fail "web build"
+        else
+            fail "web configure"
+        fi
+    else
+        printf '  skipped: emcc is not on PATH (source ~/emsdk/emsdk_env.sh)\n'
+    fi
+
     step "TUTORIAL.md code blocks"
     python3 tools/check_tutorial.py || fail "tutorial code blocks"
 
