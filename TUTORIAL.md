@@ -478,8 +478,8 @@ Each in one sentence:
   not the slices, and when the block runs out you get NULL. The *frame
   allocator* below is one of these, owned by the engine.
 - **Pool** (`mye_pool_*`) — one block cut into equal-size slots with a free
-  list threaded through them; alloc and free are O(1) pointer swaps, and
-  nothing fragments because every slot is the same size.
+  list threaded through them; alloc and free are O(1) pointer swaps **in any
+  order**, and nothing fragments because every slot is the same size.
 - **Tracking** (`mye_tracking_*`) — not a source of memory at all: a wrapper
   that forwards to any other allocator and counts what passes through (live,
   peak, failed). This is what Debug builds wrap the engine allocator in.
@@ -562,6 +562,43 @@ if (mye_tracking_has_leaks(&track)) mye_tracking_report(&track, "assets");
 
 `mye_arena_take_mark` / `mye_arena_rewind` give you a savepoint inside an arena
 — useful for "try to build this, abandon it if it does not fit".
+
+### Inside the pool
+
+Any slot can be freed at any time, in any order — that is precisely what the
+pool offers that the arena does not. The arena can only roll back its end;
+the pool tracks every free slot individually, and does it without any
+bookkeeping memory of its own.
+
+The trick is the **free list threaded through the slots themselves**. A free
+slot is, by definition, memory nobody is using — so the pool uses it: the
+first bytes of every free slot hold the address of the next free slot, and
+the pool keeps a single pointer to the head of that chain. (This is why
+elements smaller than a pointer are widened at init: a slot must be able to
+hold the link while it is free.)
+
+- `mye_pool_free(&pool, p)` writes the current head into `p` and points the
+  head at `p`. Two pointer writes, wherever `p` sits in the block.
+- `mye_pool_alloc(&pool)` takes the head slot, reads the next-slot address
+  out of it, and hands the slot to you. Two pointer reads.
+
+No search, no size lookup, no merging of neighbours. A concrete run with a
+pool of four slots A B C D:
+
+    alloc → A    alloc → B    alloc → C     (free chain: D)
+    free(B)                                 (free chain: B → D)
+    free(A)                                 (free chain: A → B → D)
+    alloc → A    alloc → B    alloc → D     (free chain: empty)
+
+Freeing B — a slot in the middle, while its neighbours stay live — cost the
+same two writes as freeing anything else, and the most recently freed slot
+is the first one reused, which tends to still be warm in the cache.
+
+This is also why the pool cannot fragment. Fragmentation is `malloc` ending
+up with free holes of the wrong size for the next request; every hole in a
+pool is exactly the right size for every request, so no free slot is ever
+wasted. The price is the constraint that bought all of this: one element
+size per pool, chosen at init.
 
 ### Rules that keep you out of trouble
 
