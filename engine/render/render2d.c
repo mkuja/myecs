@@ -228,6 +228,41 @@ void mye_render2d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
     }
 }
 
+int32_t mye_render2d_sprite_counts(const ecs_world_t *world,
+                                   int32_t *interpolated)
+{
+    if (interpolated != NULL) {
+        *interpolated = 0;
+    }
+
+    const MyeRender2dState *state = render_state(world);
+    if (state == NULL || state->sprites == NULL) {
+        return 0;
+    }
+
+    /* Iterating is a read, but flecs types the iterator on a mutable world.
+     * The same cast mye_scene_entity_count() makes, and for the same reason:
+     * the alternative is to stop describing this function as const. */
+    ecs_world_t *w = (ecs_world_t *)(uintptr_t)world;
+
+    int32_t total = 0;
+    int32_t smoothed = 0;
+    ecs_iter_t it = ecs_query_iter(w, state->sprites);
+    while (ecs_query_next(&it)) {
+        total += it.count;
+        /* MyeInterpolate is field 4 and optional, so a whole table either has
+         * it or does not -- one pointer test per table, not per entity. */
+        if (ecs_field(&it, MyeInterpolate, 4) != NULL) {
+            smoothed += it.count;
+        }
+    }
+
+    if (interpolated != NULL) {
+        *interpolated = smoothed;
+    }
+    return total;
+}
+
 static void MyeRenderSprites(ecs_iter_t *it)
 {
     (void)ecs_field(it, MyeRenderConfig, 0);

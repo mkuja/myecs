@@ -191,12 +191,16 @@ ecs_world_t *mye_init(const mye_config *config)
     if (cfg.max_steps_per_frame <= 0) cfg.max_steps_per_frame = 5;
     if (cfg.explorer_port == 0) cfg.explorer_port = 27750;
 
-    /* On by default in debug builds only: an HTTP server has no business in
-     * a shipped game. */
     /* Windowed debug builds only. Not release -- a shipped game has no
      * business running an HTTP server -- and not headless, because the test
      * suite creates hundreds of worlds that would each bind the same port
-     * and log the same line. Tests opt in via mye_config.explorer. */
+     * and log the same line. Tests opt in via mye_config.explorer.
+     *
+     * Two layers guard this, on purpose. Release does not compile the REST
+     * addon at all (FLECS_NO_REST, see cmake/MyeDependencies.cmake), so the
+     * server cannot be linked in even by accident; the runtime check below
+     * still decides whether a debug build actually starts it. */
+#if defined(FLECS_REST)
 #if defined(MYE_DEBUG)
     bool explorer = !cfg.headless;
 #else
@@ -209,6 +213,7 @@ ecs_world_t *mye_init(const mye_config *config)
     if (explorer_env != NULL) {
         explorer = explorer_env[0] == '1';
     }
+#endif
 
     mye_allocator base = mye_allocator_valid(cfg.allocator)
                              ? cfg.allocator
@@ -295,11 +300,13 @@ ecs_world_t *mye_init(const mye_config *config)
 
     /* Serve the world to the flecs Explorer. Headless worlds get it too --
      * inspecting a test run is exactly when it is most useful. */
+#if defined(FLECS_REST)
     if (explorer) {
         ecs_singleton_set(world, EcsRest, { .port = cfg.explorer_port });
         mye_log_info("explorer: https://www.flecs.dev/explorer/?host=localhost:%u",
                      (unsigned)cfg.explorer_port);
     }
+#endif
 
     ECS_IMPORT(world, MyeInputModule);
     ECS_IMPORT(world, MyeAssetsModule);

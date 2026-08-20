@@ -134,6 +134,17 @@ void MyeRender2dModuleImport(ecs_world_t *world);
 void mye_render2d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
                                    bool fallback_without_camera);
 
+/* How many entities the sprite pass would draw, and how many of those are
+ * interpolated (written to `interpolated` when it is non-NULL).
+ *
+ * Walks the pass's own query rather than a copy of its terms, so the numbers
+ * are exactly what the renderer sees -- including the MyeHidden exclusion.
+ * The work is per table rather than per entity, so it is cheap; it still
+ * iterates, so call it on a refresh cadence rather than every frame. Used by
+ * the debug overlay to report `interpolated 37/412`. */
+int32_t mye_render2d_sprite_counts(const ecs_world_t *world,
+                                   int32_t *interpolated);
+
 /* Suppresses interpolation for this entity on the next frame. Call it
  * whenever you move an entity discontinuously -- teleports, respawns, screen
  * wraps -- so the renderer does not draw the journey. No-op on entities that
