@@ -1,5 +1,9 @@
 /* Asteroids: game logic, separated from main() so it can be driven headlessly
- * by tests/integration/test_int_asteroids.c. See plan/09-testing.md. */
+ * by tests/integration/test_int_asteroids.c. See plan/09-testing.md.
+ *
+ * Nothing here knows about scenes. The menu<->play flow lives next door in
+ * scenes.c, which calls asteroids_register once and asteroids_start every
+ * time a game begins. The one concession is GameState.playing, below. */
 #ifndef ASTEROIDS_H
 #define ASTEROIDS_H
 
@@ -37,7 +41,7 @@ enum {
     ACT_TURN = 0, /* axis: -1 left, +1 right */
     ACT_THRUST,
     ACT_FIRE,
-    ACT_RESTART,
+    ACT_CONFIRM, /* ENTER: start a game, or skip the game-over wait */
 };
 
 typedef struct Velocity {
@@ -77,6 +81,13 @@ typedef struct GameState {
     bool game_over;
     int wave;
 
+    /* True between asteroids_start and asteroids_stop -- i.e. while the play
+     * scene is up. The systems that act on the world rather than on gameplay
+     * entities (wave refills, the HUD) consult it, so the menu does not
+     * quietly grow a wave of rocks behind the title. The game logic knows
+     * nothing about scenes; this flag is the whole of the coupling. */
+    bool playing;
+
     mye_texture tex_ship;
     mye_texture tex_bullet;
     mye_texture tex_rock[3];
@@ -109,8 +120,27 @@ extern ECS_COMPONENT_DECLARE(Bullet);
 extern ECS_COMPONENT_DECLARE(Explosion);
 extern ECS_COMPONENT_DECLARE(GameState);
 
-/* Registers components, input bindings, textures and systems, then spawns
- * the ship and the first wave. */
+/* Registers components, input bindings, generated art and audio, prefabs and
+ * systems. Spawns nothing: all of that is global, survives scene switches,
+ * and must be done exactly once. */
+void asteroids_register(ecs_world_t *world);
+
+/* Starts a fresh game: score, lives and wave back to the beginning, ship and
+ * first wave on the field. This is the play scene's load callback, and it is
+ * the whole of what "restart" used to mean -- minus the entity deletion,
+ * which the scene unload now does. */
+void asteroids_start(ecs_world_t *world);
+
+/* Marks the game stopped. Deliberately deletes nothing: the ship, rocks and
+ * bullets belong to the play scene and go when it unloads. */
+void asteroids_stop(ecs_world_t *world);
+
+/* A few slow rocks with no gameplay meaning, for the menu to drift behind its
+ * title. Scene-owned like everything else, so they vanish on the way in. */
+void asteroids_spawn_backdrop(ecs_world_t *world, int count);
+
+/* asteroids_register + asteroids_start: a whole game in one call, with no
+ * scene involved. The headless gameplay tests use this. */
 void asteroids_setup(ecs_world_t *world);
 
 /* Releases the query the game owns. Must run before mye_shutdown. */

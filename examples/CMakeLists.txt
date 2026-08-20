@@ -9,8 +9,14 @@ add_library(asteroids_game STATIC 02_asteroids/asteroids.c)
 target_include_directories(asteroids_game PUBLIC 02_asteroids)
 target_link_libraries(asteroids_game PRIVATE mye_flags PUBLIC engine)
 
+# The menu <-> play flow, separate from the game for the same reason: the
+# scene test drives it without a window. The dependency runs one way only --
+# the game knows nothing about scenes.
+add_library(asteroids_scenes STATIC 02_asteroids/scenes.c)
+target_link_libraries(asteroids_scenes PRIVATE mye_flags PUBLIC asteroids_game)
+
 add_executable(example_02_asteroids 02_asteroids/main.c)
-target_link_libraries(example_02_asteroids PRIVATE mye_flags asteroids_game)
+target_link_libraries(example_02_asteroids PRIVATE mye_flags asteroids_scenes)
 
 add_executable(example_03_scene3d 03_scene3d/main.c)
 target_link_libraries(example_03_scene3d PRIVATE mye_flags engine)

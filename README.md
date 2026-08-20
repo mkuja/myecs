@@ -43,7 +43,7 @@ configuration has caught bugs the others missed.
 |---|---|
 | `example_00_hello` | bare raylib window -- the toolchain check |
 | `example_01_bounce` | 1000 entities moving through ECS systems |
-| `example_02_asteroids` | a complete game: input, collision, audio, animation, prefabs |
+| `example_02_asteroids` | a complete game: menu and play scenes, input, collision, audio, animation, prefabs |
 | `example_03_scene3d` | 3D transform hierarchy, lighting, 2D HUD over a 3D scene |
 | `example_04_stress` | benchmark for entity counts and worker threads |
 | `example_06_tutorial` | every feature in one game -- the [tutorial's](TUTORIAL.md) capstone |

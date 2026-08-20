@@ -1,6 +1,11 @@
 /* End-to-end gameplay test: drives the real Asteroids game headlessly with
  * synthetic input and asserts what a player would observe -- bullets appear,
- * rocks break apart, the score rises, lives run out, restart works.
+ * rocks break apart, the score rises, lives run out, a fresh start recovers.
+ *
+ * Deliberately no scenes: asteroids_setup builds a whole game in one call and
+ * these tests hold it directly, which is what keeps the game logic honest
+ * about not depending on the flow around it. The menu <-> play flow is tested
+ * in test_int_asteroids_scenes.c.
  *
  * This is the M3 definition-of-done test. See plan/09-testing.md. */
 #include "asteroids.h"
@@ -204,8 +209,20 @@ TEST(colliding_with_a_rock_costs_a_life)
     ASSERT_EQ_INT(0, finish(world));
 }
 
-TEST(running_out_of_lives_ends_the_game_and_restart_recovers)
+TEST(running_out_of_lives_ends_the_game_and_a_fresh_start_recovers)
 {
+    /* This was "...and restart recovers", pressing R to trigger an in-place
+     * reset that deleted every rock, bullet and ship by hand. That path is
+     * gone: a game over now returns to the menu, and starting again is a
+     * scene switch, which deletes the old field as a side effect of unloading
+     * the scene that owned it.
+     *
+     * What survives here is the half that is still this file's business --
+     * the game itself, driven without any scene: running out of lives ends
+     * the game, and asteroids_start (what the play scene's load callback
+     * calls) resets score, lives and wave exactly as the old restart did.
+     * The entity-count half moved to test_int_asteroids_scenes.c, where the
+     * cleanup is real rather than manual. */
     ecs_world_t *world = start_game();
     ASSERT_NOT_NULL(world);
 
@@ -244,17 +261,25 @@ TEST(running_out_of_lives_ends_the_game_and_restart_recovers)
     ASSERT_TRUE(state->game_over);
     ASSERT_TRUE(state->lives <= 0);
 
-    /* Restart: pressing R puts a fresh ship and wave on the field. */
-    const int restart[] = { ACT_RESTART };
-    step_with(world, restart, 1);
+    int ships_before = count_of(world, ecs_id(Ship));
+    int rocks_before = count_of(world, ecs_id(Rock));
+
+    /* A fresh start: the counters go back to the beginning and a new ship and
+     * wave arrive. */
+    asteroids_start(world);
 
     state = ecs_singleton_get(world, GameState);
     ASSERT_FALSE(state->game_over);
+    ASSERT_TRUE(state->playing);
     ASSERT_EQ_INT(STARTING_LIVES, state->lives);
     ASSERT_EQ_INT(0, state->score);
-    ASSERT_EQ_INT(1, count_of(world, ecs_id(Ship)));
-    ASSERT_EQ_INT(STARTING_ROCKS, count_of(world, ecs_id(Rock)));
-    ASSERT_EQ_INT(0, count_of(world, ecs_id(Bullet)));
+    ASSERT_EQ_INT(0, state->wave);
+    ASSERT_EQ_INT(ships_before + 1, count_of(world, ecs_id(Ship)));
+    ASSERT_EQ_INT(rocks_before + STARTING_ROCKS, count_of(world, ecs_id(Rock)));
+
+    /* Note what those last two say: with no scene to own them, the *old* ship
+     * and rocks are still there. asteroids_start deletes nothing, on purpose.
+     * That is what the scene switch is for. */
 
     ASSERT_EQ_INT(0, finish(world));
 }
@@ -338,6 +363,6 @@ TEST_MAIN(TEST_CASE(game_starts_with_a_ship_and_a_wave_of_rocks),
           TEST_CASE(firing_spawns_bullets_that_expire),
           TEST_CASE(shooting_a_rock_splits_it_and_scores),
           TEST_CASE(colliding_with_a_rock_costs_a_life),
-          TEST_CASE(running_out_of_lives_ends_the_game_and_restart_recovers),
+          TEST_CASE(running_out_of_lives_ends_the_game_and_a_fresh_start_recovers),
           TEST_CASE(thrust_moves_the_ship_and_the_screen_wraps),
           TEST_CASE(clearing_a_wave_spawns_the_next_one))
