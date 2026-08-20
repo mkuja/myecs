@@ -56,6 +56,8 @@ PREAMBLE = """\
 #include "core/log.h"
 #include "core/rl_alloc.h"
 #include "input/input.h"
+#include "net/net.h"
+#include "net/net_module.h"
 #include "render/camera.h"
 #include "render/canvas.h"
 #include "render/render2d.h"
@@ -150,11 +152,15 @@ def main():
     includes = [f"-I{ROOT / 'engine'}", f"-I{ROOT / 'tests'}",
                 f"-I{deps / 'raylib-src' / 'src'}",
                 f"-I{deps / 'flecs-src' / 'include'}"]
+    # libwebsockets is here because the engine pumps the network from
+    # mye_progress, so every program that links the engine reaches the
+    # transport whether or not it opens a connection.
     libs = [str(build / "engine" / "libengine.a"),
             str(build / "libmye_alloc.a"),
             str(deps / "raylib-build" / "raylib" / "libraylib.a"),
             str(deps / "flecs-build" / "libflecs_static.a"),
-            "-lm", "-lpthread", "-ldl", "-lGL", "-lX11"]
+            str(deps / "libwebsockets-build" / "lib" / "libwebsockets.a"),
+            "-lm", "-lpthread", "-ldl", "-lGL", "-lX11", "-lcap"]
 
     text = TUTORIAL.read_text()
     failures = []

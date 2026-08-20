@@ -8,6 +8,7 @@
 #include "audio/audio.h"
 #include "collision/collision.h"
 #include "input/input.h"
+#include "net/net_module.h"
 #include "render/camera.h"
 #include "render/canvas.h"
 #include "render/render2d.h"
@@ -312,6 +313,11 @@ ecs_world_t *mye_init(const mye_config *config)
 #endif
 
     ECS_IMPORT(world, MyeInputModule);
+    /* Next to input because it is pumped in the same slot, and early because
+     * it depends on nothing: importing it creates a status singleton and a
+     * pump that services exactly the connections a game registers -- zero
+     * until one does. */
+    ECS_IMPORT(world, MyeNetModule);
     ECS_IMPORT(world, MyeAssetsModule);
     ECS_IMPORT(world, MyeAudioModule);
     ECS_IMPORT(world, MyeTransformModule);
@@ -363,6 +369,12 @@ bool mye_progress(ecs_world_t *world, float dt)
      * below must see *this* frame's input, and they cannot run from inside a
      * pipeline -- flecs forbids re-entering pipeline execution. */
     mye_input_poll(world);
+
+    /* Network I/O moves here, in the same slot and for the same reason: the
+     * fixed steps below must see the messages that arrived for THIS frame,
+     * and a system in the pipeline runs too late for that. Only connections
+     * the game registered are pumped -- see net/net_module.h. */
+    mye_net_poll(world);
 
     /* Fixed timestep ("Fix Your Timestep", Gaffer on Games): consume whole
      * steps of simulation, keep the remainder for next frame, and expose it

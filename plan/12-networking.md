@@ -127,13 +127,21 @@ Web threading note: the web build is `MYE_THREADS_NONE`
 
 ### The flecs module
 
-`MyeNetModule` owns pumping and exposes state as data:
+**Built:** [engine/net/net_module.h](../engine/net/net_module.h). `MyeNetModule`
+owns pumping and exposes state as data:
 
 - a system early in the frame (same slot as input polling — before the fixed
   steps, driven from `mye_progress`, since simulation should see this
-  frame's messages);
-- a `MyeNetStatus` singleton (status, queue depths, bytes in/out) so the
-  debug overlay can show it;
+  frame's messages). It is a real system entity (`MyeNetPump`, visible in the
+  Explorer) created with no phase, so the pipeline never runs it and
+  `mye_progress` can run it earlier than any phase reaches;
+- a `MyeNetStatus` singleton (status, peer count, queue depths, bytes in/out,
+  and a pump counter so a stalled pump is visible) — the debug overlay shows a
+  `net` line from it whenever a connection is registered;
+- **registration is explicit**: `mye_net_register` / `mye_net_unregister`. The
+  engine pumps the connections a game handed it and no others, so a tool, a
+  test, or a second connection on its own schedule stays writable — and the
+  relay in the example, which has no world at all, pumps by hand;
 - messages are *not* turned into ECS events by the engine — the game drains
   `mye_net_recv` in its own system and decides what a message means. The
   engine moves bytes; meaning is gameplay.
@@ -166,27 +174,49 @@ prefix convention used by the example, as a pattern to copy, not an API.)
 
 ## Milestones
 
-**Status: N0 is done on both targets.** The native transport has ten
-integration tests; the browser client is verified end to end against a
-native relay -- 2340 frames at 60fps, 77 sent and 77 received.
+**Status: N0 and N1 are done. N2 is done except TLS, which is still open.**
+The transport has twelve integration tests, the flecs module four, the
+presence protocol and relay eight, and the reconnect ladder nine unit tests.
 
-**N0 — transport.** `net.[ch]`, both backends, native client+server;
+**N0 — transport. Done.** `net.[ch]`, both backends, native client+server;
 `ws://` only. Echo integration test; TSan config builds it (trivially — no
 threads). *Done when:* a native test round-trips 10k messages through a
-loopback listener with zero leaks, and a web build connects to the native
-relay and echoes in headless chromium.
+loopback listener with zero leaks — **done**,
+`order_is_preserved_across_many_messages` carries 10,000 through an eight-slot
+ring in about a tenth of a second — and a
+web build connects to the native relay and echoes in headless chromium —
+**done** at N0: 2340 frames at 60fps, 77 sent and 77 received.
 
-**N1 — presence example.** `examples/07_net`: run with `--serve` for a
-headless relay; run normally to join. Each client owns one entity; positions
-are relayed; remote entities get `MyeInterpolate` (they arrive at network
-rate — exactly what render interpolation is for). Chat line via the 1-byte
-kind prefix. *Done when:* two headless clients + one relay see each other's
-movement in an integration test, and the same example works browser-to-native
-on one machine.
+**N1 — presence example. Done (native).** [examples/07_net](../examples/07_net):
+run with `--serve` for a headless relay; run normally to join. Each client
+owns one entity; positions are relayed at 15 Hz; remote entities get
+`MyeInterpolate` (they arrive at network rate — exactly what render
+interpolation is for). Chat line and round-trip time on screen, both over the
+1-byte kind prefix, which lives in
+[presence.h](../examples/07_net/presence.h) as a pattern to copy. *Done when:*
+two headless clients + one relay see each other's movement in an integration
+test — **done**, `tests/integration/test_int_net_presence.c` runs all three
+endpoints in one process and drives the example's own relay — and the same
+example works browser-to-native on one machine — **not verified**: it needs a
+browser harness, and the native run (one relay, two clients, one machine) is
+what has been proven.
 
-**N2 — hardening.** TLS decision for native `wss://` (mbedTLS vs system
-OpenSSL); reconnect-with-backoff helper; message size cap + fuzz the
-receive path; THIRD-PARTY-NOTICES entry.
+**N2 — hardening.** Reconnect-with-backoff helper — **done**,
+`mye_net_backoff` in [net.h](../engine/net/net.h): a pure state machine with a
+tick function, deterministic jitter, and no socket in it, because the engine
+must not redial behind a game's back. Message size cap — **done** at N0 — plus
+fuzzing the receive path — **done** on both levels: random frames through a
+real socket into the transport, and random bytes into the protocol decoder,
+both from a constant seed under ASan. THIRD-PARTY-NOTICES entry — **done**.
+TLS for native `wss://` (mbedTLS vs system OpenSSL) — **still open**, and a
+`wss://` URL is refused rather than silently downgraded.
+
+A bug the milestone turned up, worth recording: lws can hold bytes it has
+already read but not yet delivered — a handshake response and the first frame
+arriving in one `read()` does it — and no further `POLLIN` ever arrives to
+prompt delivery. `mye_net_pump` now asks lws whether anyone needs "forced
+service" and services exactly those. Without it a message could sit in a
+buffer until the peer happened to send something else.
 
 **Explicitly deferred:** state-sync/rollback frameworks, interest
 management, NAT traversal, matchmaking, WebRTC/WebTransport backends. The

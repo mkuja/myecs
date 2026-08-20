@@ -2,6 +2,7 @@
 
 #include "asset/asset.h"
 #include "core/log.h"
+#include "net/net_module.h"
 #include "render/render2d.h"
 #include "scene/scene.h"
 
@@ -220,6 +221,17 @@ static void draw_graph(const MyeDebugOverlay *overlay, int x, int y, int w)
     }
 }
 
+static const char *net_status_text(mye_net_status status)
+{
+    switch (status) {
+    case MYE_NET_CONNECTING: return "connecting";
+    case MYE_NET_OPEN:       return "open";
+    case MYE_NET_CLOSED:     return "closed";
+    case MYE_NET_ERROR:      return "error";
+    default:                 return "idle";
+    }
+}
+
 static void MyeDebugOverlayDraw(ecs_iter_t *it)
 {
     MyeDebugOverlay *overlay = ecs_field(it, MyeDebugOverlay, 0);
@@ -256,6 +268,14 @@ static void MyeDebugOverlayDraw(ecs_iter_t *it)
         overlay->next_refresh = now + REFRESH_SECONDS;
     }
 
+    /* Only when the game actually registered a connection: a single-player
+     * game should not be told about a network it never opened. */
+    const MyeNetStatus *net = ecs_id(MyeNetStatus) != 0
+                                  ? ecs_singleton_get(world, MyeNetStatus)
+                                  : NULL;
+    bool show_net = net != NULL && net->count > 0;
+
+
     int x = 12;
     int y = 12;
     int line = 0;
@@ -268,6 +288,9 @@ static void MyeDebugOverlayDraw(ecs_iter_t *it)
     }
     if (engine != NULL) {
         line_count += 2; /* memory, frame arena */
+    }
+    if (show_net) {
+        ++line_count; /* net */
     }
     if (overlay->top_count > 0) {
         line_count += 1 + overlay->top_count; /* header plus one row each */
@@ -348,6 +371,17 @@ static void MyeDebugOverlayDraw(ecs_iter_t *it)
     OVERLAY_LINE(dim, "scene  %s   %d owned entities",
                  scene != NULL ? scene : "(none)",
                  mye_scene_entity_count(world));
+
+    if (show_net) {
+        /* Queue depths are the interesting half: a send queue that stops
+         * draining is backpressure, and backpressure is what a stalled TCP
+         * connection looks like from inside a frame. */
+        OVERLAY_LINE(dim, "net    %s   %d peers   q %d/%d   %.0f/%.0f KB",
+                     net_status_text(net->status), net->peers,
+                     net->recv_pending, net->send_pending,
+                     (double)net->bytes_in / 1024.0,
+                     (double)net->bytes_out / 1024.0);
+    }
 
     /* Warnings and errors are the line worth colouring: a zero here is a
      * meaningful statement about the run.

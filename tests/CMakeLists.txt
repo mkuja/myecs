@@ -55,6 +55,7 @@ mye_add_unit_test(channel engine)
 mye_add_unit_test(jobs engine)
 mye_add_unit_test(draw_order engine)
 mye_add_unit_test(modules engine)
+mye_add_unit_test(net_backoff engine)
 
 mye_add_integration_test(ecs_loop LIBS engine)
 mye_add_integration_test(fixed_step LIBS engine)
@@ -76,6 +77,10 @@ mye_add_integration_test(camera LIBS engine)
 mye_add_integration_test(canvas LIBS engine)
 mye_add_integration_test(net LIBS engine)
 mye_add_integration_test(music_device LIBS engine LABELS render)
+mye_add_integration_test(net_module LIBS engine)
+# Drives the example's own relay and wire format, so the test server is the
+# one the example runs -- see examples/07_net/presence.h.
+mye_add_integration_test(net_presence LIBS net_presence)
 mye_add_integration_test(render_smoke LIBS engine LABELS render)
 mye_add_integration_test(render_sprites LIBS engine LABELS render)
 mye_add_integration_test(render_cameras LIBS engine LABELS render)
