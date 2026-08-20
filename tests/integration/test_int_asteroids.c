@@ -359,10 +359,79 @@ TEST(clearing_a_wave_spawns_the_next_one)
     ASSERT_EQ_INT(0, finish(world));
 }
 
+/* The other half of the M3 definition of done in plan/09-testing.md: "full
+ * game run under allocator tracking -> zero leaks, bounded high-water mark".
+ * Every test above asserts the zero-leaks half. This one asserts the bound.
+ *
+ * They are different failures. Zero leaks says everything was eventually
+ * freed; it says nothing about a run that grows to a gigabyte first and then
+ * tidies up. A per-frame allocation that is freed next frame, an entity
+ * churn that never reaches a steady state, a query rebuilt every step --
+ * all of those pass the leak check and would show here.
+ *
+ * Sixty seconds of scripted play, so the run reaches steady state rather
+ * than measuring the first wave. */
+TEST(a_long_game_run_stays_within_a_bounded_high_water_mark)
+{
+    ecs_world_t *world = start_game();
+    ASSERT_NOT_NULL(world);
+
+    mye_engine *engine = mye_engine_get(world);
+    ASSERT_NOT_NULL(engine);
+
+    /* Deterministic input, driven off the frame counter rather than a clock:
+     * a turn-and-shoot loop with periodic thrust, which keeps bullets,
+     * splits, wave clears and ship deaths all happening. */
+    for (int frame = 0; frame < 3600; ++frame) {
+        int actions[3];
+        int n = 0;
+        actions[n++] = ACT_FIRE;
+        if ((frame / 37) % 2 == 0) {
+            actions[n++] = ACT_TURN; /* step_with applies +1: turn right */
+        }
+        if ((frame / 53) % 3 == 0) {
+            actions[n++] = ACT_THRUST;
+        }
+        step_with(world, actions, n);
+
+        /* Keep playing after a game over, so restart is part of the soak. */
+        const GameState *s = ecs_singleton_get(world, GameState);
+        if (s != NULL && s->game_over) {
+            const int restart[] = { ACT_RESTART };
+            step_with(world, restart, 1);
+        }
+    }
+
+    size_t peak = atomic_load(&engine->tracking.peak_bytes);
+    size_t live = atomic_load(&engine->tracking.live_bytes);
+
+    /* MEASURED 2026-08-20 on this tree (Debug, x86-64 Linux): peak
+     * 3 487 704 bytes, ~3.33 MiB, of which 256 KiB is the frame arena this
+     * test configures. The run reaches that figure by frame 300 and does not
+     * move again for the remaining 3300 -- it is a plateau, not a slope,
+     * which is the property the bound is really guarding.
+     *
+     * The bound is 7 MiB: roughly 2x headroom, enough to absorb a flecs
+     * version bump or a handful of new components without becoming a
+     * tripwire, and far below what any of the failures above would produce.
+     * Re-measure and move it deliberately if the engine grows; do not nudge
+     * it to make a red test green. */
+    if (peak >= 7u * 1024u * 1024u) {
+        MYE_FAIL_("high-water mark %zu bytes exceeds the 7 MiB bound "
+                  "(live at the end: %zu)", peak, live);
+    }
+    /* And the run really did allocate: a bound that passes because nothing
+     * happened is not a bound. The frame arena alone is 256 KiB. */
+    ASSERT_TRUE(peak > 512u * 1024u);
+
+    ASSERT_EQ_INT(0, finish(world)); /* still no leaks */
+}
+
 TEST_MAIN(TEST_CASE(game_starts_with_a_ship_and_a_wave_of_rocks),
           TEST_CASE(firing_spawns_bullets_that_expire),
           TEST_CASE(shooting_a_rock_splits_it_and_scores),
           TEST_CASE(colliding_with_a_rock_costs_a_life),
           TEST_CASE(running_out_of_lives_ends_the_game_and_a_fresh_start_recovers),
           TEST_CASE(thrust_moves_the_ship_and_the_screen_wraps),
-          TEST_CASE(clearing_a_wave_spawns_the_next_one))
+          TEST_CASE(clearing_a_wave_spawns_the_next_one),
+          TEST_CASE(a_long_game_run_stays_within_a_bounded_high_water_mark))

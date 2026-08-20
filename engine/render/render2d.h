@@ -134,6 +134,31 @@ void MyeRender2dModuleImport(ecs_world_t *world);
 void mye_render2d_draw_cameras_for(ecs_world_t *world, ecs_entity_t target,
                                    bool fallback_without_camera);
 
+/* testing seam -------------------------------------------------------------
+ *
+ * One entry per visible sprite, built fresh in the frame arena each time the
+ * sprite pass runs. It is a renderer-internal detail and no game should build
+ * one; it lives here only so the sort order can be unit tested without a GL
+ * context, which is what plan/09-testing.md asks of "render logic". */
+typedef struct MyeDrawItem {
+    const Texture2D *texture;
+    Rectangle source;
+    Rectangle dest;
+    Vector2 origin;
+    float rotation_degrees;
+    Color tint;
+    int32_t layer;
+} MyeDrawItem;
+
+/* qsort comparator for the draw list. Back-to-front: layer first, then
+ * dest.y so entities lower on screen overlap those above them, then texture
+ * address so raylib can batch identical textures into one draw call. Items
+ * equal on all three compare equal, and qsort is free to order them either
+ * way -- nothing downstream may depend on that. */
+int mye_draw_item_compare(const void *lhs, const void *rhs);
+
+/* ------------------------------------------------------------------------- */
+
 /* Suppresses interpolation for this entity on the next frame. Call it
  * whenever you move an entity discontinuously -- teleports, respawns, screen
  * wraps -- so the renderer does not draw the journey. No-op on entities that

@@ -1,6 +1,40 @@
 # Third-party dependencies, fetched at configure time and pinned to exact tags.
 # SYSTEM makes their headers -isystem, so their warnings never break our
 # -Werror build. See plan/08-build.md.
+#
+# FIND_PACKAGE_ARGS -- the stated reason for the CMake >= 3.24 floor -- lets an
+# already-installed package satisfy a dependency instead of a fetch. It is
+# OPT_IN by default: only declarations that name it are looked up at all, so
+# adding it to one dependency changes nothing for the others.
+#
+# It is on for flecs alone, and that is a deliberate line rather than an
+# oversight. A system package may stand in only where it can do the whole job:
+#
+#   flecs          -- yes. The engine reaches it through public API only: the
+#                     allocator bridge is ecs_os_set_api() at runtime, so any
+#                     build of the right version serves. Pinned EXACT, because
+#                     4.x has moved query and pipeline semantics under us
+#                     before and a "close enough" flecs is a debugging trap.
+#                     Note that upstream installs no config-version file, so
+#                     an EXACT request never matches an installed flecs today
+#                     -- which is the safe outcome, not a bug: the pin wins
+#                     until upstream can prove its version.
+#
+#   raylib         -- no, and it must stay no. We compile raylib ourselves with
+#                     engine/core/rl_alloc.h force-included (see the bottom of
+#                     this file) so its allocations route through mye_alloc and
+#                     land in the leak report. An imported target cannot be
+#                     given compile options at all, so a found raylib would
+#                     fail the configure outright -- and if it somehow did not,
+#                     it would silently drop raylib out of allocator tracking.
+#
+#   libwebsockets  -- no. The build below turns LWS_WITH_EXTERNAL_POLL on and
+#                     TLS/extensions off; a distro build has its own answers to
+#                     all three, and external poll is load-bearing (lws_service
+#                     sleeps, which is fatal inside a frame).
+#
+# To ignore an installed flecs and always fetch:
+#     cmake -DFETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER ...
 
 include(FetchContent)
 
@@ -24,7 +58,10 @@ FetchContent_Declare(flecs
     GIT_REPOSITORY https://github.com/SanderMertens/flecs.git
     GIT_TAG        v4.1.6
     GIT_SHALLOW    TRUE
-    SYSTEM)
+    SYSTEM
+    # EXACT: nothing but the pinned version may stand in. See the note at the
+    # top of this file.
+    FIND_PACKAGE_ARGS 4.1.6 EXACT CONFIG)
 
 # -------------------------------------------------------- libwebsockets ----
 # Native only: a web build gets its WebSocket from the browser, so shipping a
@@ -64,6 +101,15 @@ set(_mye_skip_install_backup ${CMAKE_SKIP_INSTALL_RULES})
 set(CMAKE_SKIP_INSTALL_RULES ON)
 
 FetchContent_MakeAvailable(raylib flecs)
+
+# Say which flecs the build is actually using: "it worked on my machine" and
+# "it found a different flecs on yours" look identical without this line.
+if(flecs_FOUND)
+    message(STATUS "flecs: system package ${flecs_VERSION} (FIND_PACKAGE_ARGS)")
+else()
+    message(STATUS "flecs: fetched pin v4.1.6")
+endif()
+
 if(NOT EMSCRIPTEN)
     FetchContent_MakeAvailable(libwebsockets)
 
