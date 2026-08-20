@@ -203,6 +203,14 @@ Score *score = ecs_singleton_ensure(world, Score);
 score->points += 10;
 ```
 
+*Trait* is flecs vocabulary, not a language feature. A trait is an ordinary
+tag or pair added to the **component's own entity** to change how flecs treats
+that component — `EcsSingleton` here, `OnInstantiate` on prefabs (§10); the
+flecs manual's *Component Traits* page lists the rest. The name collides with
+C++ type traits and Rust traits, but those are compile-time constructs of the
+type system; a flecs trait is runtime data in the world, like everything else
+in flecs.
+
 A system can take a singleton as an ordinary term — `ECS_SYSTEM(world, Tick,
 EcsOnUpdate, Score)` — and it matches once per frame.
 
