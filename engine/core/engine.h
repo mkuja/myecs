@@ -192,6 +192,43 @@ int mye_shutdown(ecs_world_t *world);
  * not. Every engine spawn helper goes through this. */
 ecs_entity_t mye_entity_new(ecs_world_t *world);
 
+/* ------------------------------------------------------- gameplay events -- */
+
+/* Sends a gameplay event to observers. See plan/00-overview.md Tier 2,
+ * "gameplay events via flecs observers / ecs_emit".
+ *
+ * An event is any entity. When it is a COMPONENT id, that component's type is
+ * also the payload's type, which is how an event carries data:
+ *
+ *   typedef struct Opened { ecs_entity_t by; } Opened;
+ *   ECS_COMPONENT_DEFINE(world, Opened);
+ *
+ *   ecs_observer(world, {
+ *       .query.terms = {{ .id = EcsAny, .src.id = chest }},
+ *       .events = { ecs_id(Opened) },
+ *       .callback = OnOpened,          // (const Opened *)it->param
+ *   });
+ *
+ *   mye_event_emit(world, chest, ecs_id(Opened), 0, &(Opened){ .by = player });
+ *
+ * `id` decides WHO can hear it:
+ *
+ *   0            an entity event. Only observers written against that one
+ *                entity -- `{ EcsAny, .src.id = chest }` -- are notified.
+ *   a component  observers querying for that component are notified too, for
+ *                whichever entity the event was emitted on. This is how you
+ *                say "tell me whenever this happens to ANYTHING with a
+ *                MyeCollider2D" without naming entities in advance.
+ *                Entity observers still hear it: flecs matches EcsAny first.
+ *
+ * Observers run synchronously, before this returns, so `payload` may point at
+ * a stack value. Pass NULL for an event that carries nothing.
+ *
+ * Structural changes made by an observer (ecs_delete, ecs_add) are deferred
+ * to the end of the enclosing system, as they are anywhere else. */
+void mye_event_emit(ecs_world_t *world, ecs_entity_t entity,
+                    ecs_entity_t event, ecs_id_t id, const void *payload);
+
 /* Convenience accessors. */
 mye_engine *mye_engine_get(const ecs_world_t *world);
 /* Per-frame scratch allocator. Everything from it is invalidated at the top
