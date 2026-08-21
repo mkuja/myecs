@@ -1,4 +1,3 @@
-<!-- GENERATED FILE: rendered from TUTORIAL.mdt by tools/check_tutorial.py render. Edit TUTORIAL.mdt. -->
 # myecs — the whole engine, one feature at a time
 
 This is the only tutorial. It covers every feature the engine currently has:
@@ -196,14 +195,36 @@ ECS_COMPONENT_DECLARE(Score);
 ```
 
 ```c test name=singleton-score
+///- /* Hidden: a headless world for the fragment to run in -- no window, no
+///-  * GL context, the whole ECS. */
+///- ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
+///- ASSERT_TRUE(world != NULL);
 ECS_COMPONENT_DEFINE(world, Score);
 /* The trait is for queries, not for the accessors below: it is what makes
  * a bare Score term read this one entity. */
 ecs_add_id(world, ecs_id(Score), EcsSingleton);
+///- /* A trait is a tag on the *component's own entity*, not on any instance
+///-  * of it -- that is what makes it a trait rather than a component. */
+///- ASSERT_TRUE(ecs_has_id(world, ecs_id(Score), EcsSingleton));
+///- /* "makes a bare Score term read this one entity", pinned: with the
+///-  * trait, a term that named no source resolves to a fixed source -- the
+///-  * component's own entity -- instead of matching per-entity. */
+///- ecs_query_t *q = ecs_query(world, { .terms = {{ ecs_id(Score) }} });
+///- ASSERT_TRUE(q != NULL);
+///- ASSERT_TRUE((q->terms[0].src.id & EcsIsEntity) != 0);
+///- ASSERT_EQ_U64(ecs_id(Score), ECS_TERM_REF_ID(&q->terms[0].src));
+///- ecs_query_fini(q);
 
 ecs_singleton_set(world, Score, { .points = 0 });
 Score *score = ecs_singleton_ensure(world, Score);
 score->points += 10;
+///- /* "stored on its own type's entity": the singleton and the component
+///-  * entity's own instance are one and the same storage. */
+///- ASSERT_EQ_PTR(score, ecs_get(world, ecs_id(Score), Score));
+///- /* "one instance, world-wide": `ensure` handed back a pointer into the
+///-  * world, so the += landed there and not on a copy. */
+///- ASSERT_EQ_INT(10, ecs_singleton_get(world, Score)->points);
+///- ASSERT_EQ_INT(0, mye_shutdown(world));   /* also asserts no leaks */
 ```
 
 *Trait* is flecs vocabulary, not a language feature. A trait is an ordinary
@@ -378,7 +399,37 @@ discrepancy with no visible cause. The engine should not diverge data from
 pixels behind your back — so you ask for it, per entity.
 
 ```c test name=interpolate-opt-in
+///- /* Hidden: a headless world and two entities alike in every way but
+///-  * one -- only the player asks for interpolation. */
+///- ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
+///- ASSERT_TRUE(world != NULL);
+///- ecs_entity_t player = mye_entity_new(world);
+///- ecs_set(world, player, MyePosition2D, { 640.0f, 360.0f });
+///- ecs_entity_t rock = mye_entity_new(world);
+///- ecs_set(world, rock, MyePosition2D, { 640.0f, 360.0f });
 ecs_set(world, player, MyeInterpolate, { 0 });   /* that is the whole feature */
+///- /* And the engine takes it from there. prev_x/prev_y are zero from the
+///-  * initialiser above; the engine fills them with the entity's position at
+///-  * the top of the next fixed step, which is the whole mechanism. */
+///- mye_progress(world, 1.0f / 60.0f);
+///- const MyeInterpolate *interp = ecs_get(world, player, MyeInterpolate);
+///- ASSERT_TRUE(interp != NULL);
+///- ASSERT_NEAR(640.0f, interp->prev_x, 1e-4);
+///- ASSERT_NEAR(360.0f, interp->prev_y, 1e-4);
+///- /* Per entity, and never behind your back: the rock never asked, so its
+///-  * drawn position still IS its MyePosition2D. */
+///- ASSERT_TRUE(ecs_get(world, rock, MyeInterpolate) == NULL);
+///- /* The streak, and its cure: after a teleport mye_transform_snap moves
+///-  * prev to the destination, so the next blend has nothing to smear across
+///-  * -- and it is a no-op on the rock, which has nothing to suppress. */
+///- ecs_set(world, player, MyePosition2D, { 10.0f, 360.0f });
+///- mye_transform_snap(world, player);
+///- mye_transform_snap(world, rock);
+///- interp = ecs_get(world, player, MyeInterpolate);
+///- ASSERT_TRUE(interp->snap);
+///- ASSERT_NEAR(10.0f, interp->prev_x, 1e-4);
+///- ASSERT_TRUE(ecs_get(world, rock, MyeInterpolate) == NULL);
+///- ASSERT_EQ_INT(0, mye_shutdown(world));  /* also asserts no leaks */
 ```
 
 The one thing you must know: **interpolation blends between two positions, so
@@ -550,7 +601,10 @@ mye_arena_init(&arena, mye_heap_allocator(), 64 * 1024);
 mye_allocator a = mye_arena_allocator(&arena);
 
 Thing *t = MYE_NEW(a, Thing);
+///- ASSERT_NOT_NULL(t);                   /* the arena handed out memory */
 mye_arena_reset(&arena);                 /* frees everything at once */
+///- ASSERT_EQ_U64(0, mye_arena_used(&arena));        /* everything, not just t */
+///- ASSERT_TRUE(mye_arena_high_water(&arena) >= sizeof(Thing));  /* peak survives */
 printf("peak %zu bytes\n", mye_arena_high_water(&arena));
 mye_arena_deinit(&arena);
 
@@ -559,7 +613,10 @@ mye_pool pool;
 mye_pool_init(&pool, mye_heap_allocator(), sizeof(Particle),
                _Alignof(Particle), 4096);
 Particle *p = mye_pool_alloc(&pool);     /* NULL when exhausted */
+///- ASSERT_NOT_NULL(p);                   /* 4096 slots: not exhausted */
+///- ASSERT_EQ_U64(1, mye_pool_live(&pool));
 mye_pool_free(&pool, p);
+///- ASSERT_EQ_U64(0, mye_pool_live(&pool));           /* the slot went back */
 mye_pool_deinit(&pool);
 
 /* Tracking: wraps another allocator and counts. What Debug builds use. */
@@ -567,6 +624,10 @@ mye_tracking track;
 mye_tracking_init(&track, mye_heap_allocator());
 mye_allocator checked = mye_tracking_allocator(&track);
 /* ... use `checked` ... */
+///- Thing *tracked = MYE_NEW(checked, Thing);
+///- ASSERT_TRUE(mye_tracking_has_leaks(&track));     /* one block still live */
+///- MYE_DELETE(checked, tracked);
+///- ASSERT_FALSE(mye_tracking_has_leaks(&track));    /* balanced: no leak */
 if (mye_tracking_has_leaks(&track)) mye_tracking_report(&track, "assets");
 ```
 
@@ -829,10 +890,22 @@ asked for 48px, and the text would come out blurry with nothing on screen to
 say why.
 
 ```c test name=hud-text-owns-its-string
+///- ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
+///- ASSERT_TRUE(world != NULL);
 /* A HUD label. Screen space, drawn in MyeOnDrawUI: sixteen pixels from the
  * corner stays sixteen pixels whatever the camera is doing. */
 ecs_entity_t score = mye_text_spawn(world, "SCORE 0", 16.0f, 16.0f, RAYWHITE);
 mye_text_set(world, score, TextFormat("SCORE %d", 1200));
+///- /* The component COPIED the string. TextFormat hands out a slot in a
+///-  * rotating ring, so a borrowed pointer would be reading somebody
+///-  * else's text a few calls later: churn the ring and look. */
+///- for (int spin = 0; spin < 8; ++spin) {
+///-     (void)TextFormat("clobber %d", spin);
+///- }
+///- ASSERT_STR_EQ("SCORE 1200", ecs_get(world, score, MyeText)->text);
+///- /* And the handle mye_text_spawn left really is zeroed. */
+///- ASSERT_EQ_U64(0, ecs_get(world, score, MyeText)->font.index);
+///- ASSERT_EQ_U64(0, ecs_get(world, score, MyeText)->font.generation);
 
 /* A font of your own. A zeroed handle -- what mye_text_spawn leaves -- means
  * raylib's built-in font, so text appears before you have loaded anything. */
@@ -840,11 +913,21 @@ mye_font ui = mye_font_load(world, "assets/fonts/Inter.ttf", 24);
 ecs_set(world, score, MyeText,
         { .text = "SCORE 0", .font = ui, .size = 24.0f, .spacing = 1.0f,
           .color = RAYWHITE });
+///- /* The font path is illustrative: when it is not there mye_font_load
+///-  * says so and leaves `ui` zeroed -- which IS the built-in font, so
+///-  * the component is well formed either way. What is pinned here is
+///-  * the string: ecs_set replaced it and freed the previous copy, and
+///-  * the shutdown assert at the end is what proves the free. */
+///- ASSERT_STR_EQ("SCORE 0", ecs_get(world, score, MyeText)->text);
+///- ASSERT_NEAR(24.0f, ecs_get(world, score, MyeText)->size, 0.001f);
 
 /* Right-align it: measuring needs the real glyph metrics, so this is 0,0 in
  * a headless world. */
 Vector2 size = mye_text_measure(world, ecs_get(world, score, MyeText));
+///- ASSERT_NEAR(0.0f, size.x, 0.001f);   /* no atlas without a GPU */
+///- ASSERT_NEAR(0.0f, size.y, 0.001f);
 ecs_set(world, score, MyePosition2D, { 1264.0f - size.x, 16.0f });
+///- ASSERT_NEAR(1264.0f, ecs_get(world, score, MyePosition2D)->x, 0.001f);
 
 /* A label that lives in the world instead, scrolling and scaling with the 2D
  * camera. An explicit flag, never inferred from what else is on the entity. */
@@ -852,6 +935,20 @@ ecs_entity_t tag = mye_text_spawn(world, "HQ", 500.0f, 320.0f, YELLOW);
 MyeText *label = ecs_get_mut(world, tag, MyeText);
 label->world_space = true;
 ecs_modified(world, tag, MyeText);
+///-
+///- /* World space is a flag, never inferred: the HUD label carries the
+///-  * same component and stays in screen space. */
+///- ASSERT_TRUE(ecs_get(world, tag, MyeText)->world_space);
+///- ASSERT_FALSE(ecs_get(world, score, MyeText)->world_space);
+///- ASSERT_STR_EQ("HQ", ecs_get(world, tag, MyeText)->text);
+///-
+///- /* Run frames with text entities in them; the strings survive. */
+///- for (int frame = 0; frame < 3; ++frame) {
+///-     ASSERT_TRUE(mye_progress(world, 1.0f / 60.0f));
+///- }
+///- ASSERT_STR_EQ("SCORE 0", ecs_get(world, score, MyeText)->text);
+///-
+///- ASSERT_EQ_INT(0, mye_shutdown(world));  /* every copy was freed */
 ```
 
 Two things about the world-space flag, both because that pass is its own
@@ -889,11 +986,47 @@ stays put while the world scrolls underneath it.
 Add `MyeCameraFollow` — no system to write:
 
 ```c test name=camera-follow-lag
+///- ecs_world_t *world = mye_init(&(mye_config){ .headless = true,
+///-                                              .width = 1280,
+///-                                              .height = 720 });
+///- ASSERT_TRUE(world != NULL);
+///- ecs_entity_t player = mye_spawn_2d(world, (Vector2){ 100.0f, 0.0f });
+///- ecs_entity_t camera = mye_camera2d_spawn(world, (Vector2){ 0.0f, 0.0f },
+///-                                          1.0f);
 ecs_set(world, camera, MyeCameraFollow,
         { .target = player,
           /* 0 snaps exactly; ~8 lags gently; ~20 is nearly rigid. The lag is
            * framerate-independent, so it looks the same at 30 and 240 fps. */
           .stiffness = 8.0f });
+///-
+///- /* One frame at 60 fps: it has moved, and it is nowhere near there
+///-  * -- 1 - exp(-8/60) of the way, which is the gentle lag. A snap
+///-  * (stiffness 0) would be sitting on the target already. */
+///- ASSERT_TRUE(mye_progress(world, 1.0f / 60.0f));
+///- float x = ecs_get(world, camera, MyePosition2D)->x;
+///- ASSERT_TRUE(x > 1.0f && x < 50.0f);
+///-
+///- /* The rest of that second: monotone, never past the target, and
+///-  * it does arrive. */
+///- for (int frame = 1; frame < 60; ++frame) {
+///-     mye_progress(world, 1.0f / 60.0f);
+///-     float next = ecs_get(world, camera, MyePosition2D)->x;
+///-     ASSERT_TRUE(next >= x && next <= 100.0f);
+///-     x = next;
+///- }
+///- const float at_60fps = x;
+///- ASSERT_NEAR(100.0f, at_60fps, 0.5f);
+///-
+///- /* Framerate-independent: put the camera back and replay the same
+///-  * second at 240 fps. Exponential decay, so four times as many
+///-  * steps land in the same place, not four times closer. */
+///- ecs_set(world, camera, MyePosition2D, { 0.0f, 0.0f });
+///- for (int frame = 0; frame < 240; ++frame) {
+///-     mye_progress(world, 1.0f / 240.0f);
+///- }
+///- ASSERT_NEAR(at_60fps, ecs_get(world, camera, MyePosition2D)->x, 0.05f);
+///-
+///- ASSERT_EQ_INT(0, mye_shutdown(world));
 ```
 
 The lag matters more than it sounds: a camera welded to the player makes the
@@ -1021,12 +1154,38 @@ ecs_modified(world, eye, MyeCamera3D);
 Now show it. As a sprite:
 
 ```c test name=canvas-shown-as-a-sprite
+///- ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
+///- ASSERT_TRUE(world != NULL);
+///- ecs_entity_t canvas =
+///-     mye_canvas_create(world, "minimap", 256, 256, BLACK);
+///- ASSERT_TRUE(canvas != 0);
 ecs_entity_t shown = mye_entity_new(world);
 ecs_set(world, shown, MyePosition2D, { 0.0f, 0.0f });
 ecs_set(world, shown, MyeSprite,
         { .texture = mye_canvas_texture(world, canvas),
           .source = mye_canvas_source_rect(world, canvas),
           .tint = WHITE });
+///-
+///- /* Render textures are stored bottom-up, so the rect that draws one
+///-  * the right way up has a NEGATIVE height -- and it covers the whole
+///-  * canvas, exactly once. */
+///- const MyeSprite *sprite = ecs_get(world, shown, MyeSprite);
+///- const MyeCanvas *surface = ecs_get(world, canvas, MyeCanvas);
+///- ASSERT_NEAR(0.0f, sprite->source.x, 0.001f);
+///- ASSERT_NEAR(0.0f, sprite->source.y, 0.001f);
+///- ASSERT_NEAR((float)surface->width, sprite->source.width, 0.001f);
+///- ASSERT_NEAR(-(float)surface->height, sprite->source.height, 0.001f);
+///- ASSERT_TRUE(sprite->source.height < 0.0f);
+///-
+///- /* The sprite carries the canvas's own texture handle -- zeroed in a
+///-  * headless world, where there is no GL surface to adopt, and the
+///-  * canvas's either way. */
+///- mye_texture again = mye_canvas_texture(world, canvas);
+///- ASSERT_EQ_U64(again.index, sprite->texture.index);
+///- ASSERT_EQ_U64(again.generation, sprite->texture.generation);
+///-
+///- ASSERT_TRUE(mye_progress(world, 1.0f / 60.0f));
+///- ASSERT_EQ_INT(0, mye_shutdown(world));
 ```
 
 That `source` matters. Render textures are stored bottom-up, so drawn naively
@@ -1351,6 +1510,9 @@ Several bindings can drive one action, and axis values from all of them sum and
 clamp to [-1, 1] — so WASD and arrows and a stick all work at once, for free.
 
 ```c test name=input-actions
+///- /* Hidden: a headless world -- no window, so nothing polls a real key. */
+///- ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
+///- ASSERT_TRUE(world != NULL);
 enum { ACT_MOVE_X, ACT_MOVE_Y, ACT_JUMP };
 
 mye_input_bind_axis_keys(world, ACT_MOVE_X, KEY_A, KEY_D);       /* -1 .. +1 */
@@ -1358,11 +1520,44 @@ mye_input_bind_axis_keys(world, ACT_MOVE_X, KEY_LEFT, KEY_RIGHT);
 mye_input_bind_gamepad_axis(world, ACT_MOVE_X, 0, GAMEPAD_AXIS_LEFT_X, 0.2f);
 mye_input_bind_key(world, ACT_JUMP, KEY_SPACE);
 mye_input_bind_gamepad_button(world, ACT_JUMP, 0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+///- /* "Several bindings can drive one action": each key pair is two
+///-  * bindings, so ACT_MOVE_X ends up with WASD, arrows and the stick. */
+///- MyeInput *input = ecs_singleton_ensure(world, MyeInput);
+///- ASSERT_NOT_NULL(input);
+///- ASSERT_EQ_INT(7, input->binding_count);     /* 2 + 2 + 1 + 1 + 1 */
+///- int move_x_bindings = 0;
+///- for (int i = 0; i < input->binding_count; ++i) {
+///-     if (input->binding_action[i] == ACT_MOVE_X) ++move_x_bindings;
+///- }
+///- ASSERT_EQ_INT(5, move_x_bindings);
+///- /* "a test writes the action state directly and the same gameplay code
+///-  * runs headless": `synthetic` stops the raylib poll from overwriting
+///-  * what we write. Two sources push ACT_MOVE_X the same way. */
+///- input->synthetic = true;
+///- mye_input_frame_begin(input);
+///- mye_input_apply(input, ACT_MOVE_X, true, 1.0f);
+///- mye_input_apply(input, ACT_MOVE_X, true, 0.8f);
+///- mye_input_apply(input, ACT_JUMP, true, 1.0f);
+///- mye_input_frame_end(input);
+///- ecs_singleton_modified(world, MyeInput);
 
 /* In a system: */
 float dx = mye_action_value(world, ACT_MOVE_X);   /* analog */
 if (mye_action_pressed(world, ACT_JUMP)) { }      /* this frame only */
 if (mye_action_down(world, ACT_JUMP))    { }      /* held */
+///- /* "values from all of them sum and clamp to [-1, 1]": 1.0 + 0.8 = 1.0. */
+///- ASSERT_NEAR(1.0f, dx, 1e-6);
+///- ASSERT_TRUE(mye_action_pressed(world, ACT_JUMP));
+///- ASSERT_TRUE(mye_action_down(world, ACT_JUMP));
+///- /* "`pressed` ... is true for exactly one frame": still held on the next
+///-  * frame, but no longer a fresh press. */
+///- mye_input_frame_begin(input);
+///- mye_input_apply(input, ACT_JUMP, true, 1.0f);
+///- mye_input_frame_end(input);
+///- ecs_singleton_modified(world, MyeInput);
+///- ASSERT_FALSE(mye_action_pressed(world, ACT_JUMP));
+///- ASSERT_TRUE(mye_action_down(world, ACT_JUMP));
+///- ASSERT_EQ_INT(0, mye_shutdown(world));   /* also asserts no leaks */
 ```
 
 `pressed` is the rising edge and is true for exactly one frame. It is computed
@@ -1464,16 +1659,73 @@ both work; the engine never inspects the extension, but raylib 6.0 picks its
 decoder by it, so name a file for what is actually in it.
 
 ```c test name=music-transport
+///- /* Hidden: a headless world (§20) -- no window, no audio device -- so
+///-  * nothing here is audible and what is asserted is the playback state
+///-  * machine, which is what a game's logic actually depends on.
+///-  *
+///-  * mye_music_load still insists the file is there, device or not (a typo
+///-  * has to fail in the silent run too), and without a device nothing
+///-  * decodes it -- so the tutorial's relative path is made real under
+///-  * TMPDIR, and the test runs from there for exactly the one line that
+///-  * touches the disk. */
+///- ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
+///- ASSERT_TRUE(world != NULL);
+///- char cwd[512], dir[512];
+///- snprintf(cwd, sizeof cwd, "%s", GetWorkingDirectory());
+///- const char *tmpdir = getenv("TMPDIR");
+///- snprintf(dir, sizeof dir, "%s/mye_tutorial_audio",
+///-          tmpdir != NULL && tmpdir[0] != '\0' ? tmpdir : "/tmp");
+///- if (!DirectoryExists(dir)) MakeDirectory(dir);
+///- ASSERT_TRUE(ChangeDirectory(dir));
+///- if (!DirectoryExists("audio")) MakeDirectory("audio");
+///- unsigned char one_byte[1] = { 0 };
+///- ASSERT_TRUE(SaveFileData("audio/theme.ogg", one_byte, 1));
 mye_music theme = mye_music_load(world, "audio/theme.ogg");
+///- ASSERT_TRUE(ChangeDirectory(cwd));   /* nothing below touches the disk */
+///- ASSERT_TRUE(mye_music_valid(world, theme));
+///- /* "Nothing here happens on its own": loading opened the track, it did
+///-  * not start it. */
+///- ASSERT_EQ_INT(0, (int)mye_music_current(world).generation);
+///- const MyeAudio *audio = ecs_singleton_get(world, MyeAudio);
+///- ASSERT_NOT_NULL(audio);
 
 mye_music_play(world, theme);                 /* once, at full volume */
+///- ASSERT_EQ_INT((int)theme.generation,
+///-               (int)mye_music_current(world).generation);
+///- audio = ecs_singleton_get(world, MyeAudio);
+///- ASSERT_NEAR(1.0, audio->music.volume, 1e-6);  /* "at full volume" */
+///- ASSERT_FALSE(audio->music.loop);              /* "once": no repeat */
 mye_music_play_ex(world, theme, 0.6f, true);  /* volume, looping */
+///- audio = ecs_singleton_get(world, MyeAudio);
+///- ASSERT_NEAR(0.6, audio->music.volume, 1e-6);
+///- ASSERT_TRUE(audio->music.loop);   /* the only way to repeat a track */
+///- /* The same track it was already playing: the settings took, and there is
+///-  * still exactly one track current. */
+///- ASSERT_EQ_INT((int)theme.generation,
+///-               (int)mye_music_current(world).generation);
 
 mye_music_pause(world);
+///- ASSERT_TRUE(mye_music_paused(world));
+///- /* Paused is still current: the track is held, not forgotten. */
+///- ASSERT_EQ_INT((int)theme.generation,
+///-               (int)mye_music_current(world).generation);
 mye_music_resume(world);
+///- ASSERT_FALSE(mye_music_paused(world));
 mye_music_set_volume(world, 0.3f);            /* master volume still applies */
+///- audio = ecs_singleton_get(world, MyeAudio);
+///- ASSERT_NEAR(0.3, audio->music.volume, 1e-6);
+///- /* "master volume still applies": a second knob, kept apart from the
+///-  * track's own -- setting this one left it alone (headless there is no
+///-  * mixer to watch the two multiply). */
+///- ASSERT_NEAR(1.0, audio->master_volume, 1e-6);
 mye_music_stop(world);                        /* pause keeps the position;
                                                  stop forgets it */
+///- /* Forgotten, and not merely paused: nothing is current at all. */
+///- ASSERT_EQ_INT(0, (int)mye_music_current(world).generation);
+///- ASSERT_FALSE(mye_music_paused(world));
+///- mye_music_release(world, theme);   /* what a scene exit would do */
+///- ASSERT_FALSE(mye_music_valid(world, theme));
+///- ASSERT_EQ_INT(0, mye_shutdown(world));  /* also asserts no leaks */
 ```
 
 **Why it is.** Two things are worth knowing before you write a music system.
@@ -1494,10 +1746,53 @@ times in one frame, or from a system that runs every frame forever, and you get
 one stream that plays through undisturbed. To rewind on purpose, stop first:
 
 ```c test name=music-rewind
+///- /* Hidden: the headless world again (§20), and the tutorial's relative
+///-  * path made real under TMPDIR so the loader -- which insists the file is
+///-  * there with or without a device -- finds it. Nothing decodes it without
+///-  * one, so any bytes will do. */
+///- ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
+///- ASSERT_TRUE(world != NULL);
+///- char cwd[512], dir[512];
+///- snprintf(cwd, sizeof cwd, "%s", GetWorkingDirectory());
+///- const char *tmpdir = getenv("TMPDIR");
+///- snprintf(dir, sizeof dir, "%s/mye_tutorial_audio",
+///-          tmpdir != NULL && tmpdir[0] != '\0' ? tmpdir : "/tmp");
+///- if (!DirectoryExists(dir)) MakeDirectory(dir);
+///- ASSERT_TRUE(ChangeDirectory(dir));
+///- if (!DirectoryExists("audio")) MakeDirectory("audio");
+///- unsigned char one_byte[1] = { 0 };
+///- ASSERT_TRUE(SaveFileData("audio/theme.ogg", one_byte, 1));
 mye_music theme = mye_music_load(world, "audio/theme.ogg");
+///- ASSERT_TRUE(ChangeDirectory(cwd));   /* nothing below touches the disk */
+///- ASSERT_TRUE(mye_music_valid(world, theme));
+///- /* Why the stop below is needed at all: asking for the track that is
+///-  * already playing does nothing -- five asks in one frame, as a fixed-step
+///-  * system would make them, leave one track current and undisturbed. */
+///- for (int step = 0; step < 5; ++step) {
+///-     mye_music_play_ex(world, theme, 0.6f, true);
+///- }
+///- ASSERT_EQ_INT((int)theme.generation,
+///-               (int)mye_music_current(world).generation);
+///- ASSERT_FALSE(mye_music_paused(world));
+///- const MyeAudio *audio = ecs_singleton_get(world, MyeAudio);
+///- ASSERT_TRUE(audio->music.loop);          /* one looping stream, still */
+///- ASSERT_NEAR(0.6, audio->music.volume, 1e-6);
 
 mye_music_stop(world);
+///- /* Stop forgets the track, which is what makes the next line a start
+///-  * rather than another no-op ask. */
+///- ASSERT_EQ_INT(0, (int)mye_music_current(world).generation);
 mye_music_play(world, theme);   /* from the beginning */
+///- /* Headless there is no clock to watch a position on, but the state moved:
+///-  * the track is current again, and this start took plain play's own
+///-  * defaults rather than inheriting the looping 0.6 from before it. */
+///- ASSERT_EQ_INT((int)theme.generation,
+///-               (int)mye_music_current(world).generation);
+///- audio = ecs_singleton_get(world, MyeAudio);
+///- ASSERT_FALSE(audio->music.loop);
+///- ASSERT_NEAR(1.0, audio->music.volume, 1e-6);
+///- mye_music_release(world, theme);   /* what a scene exit would do */
+///- ASSERT_EQ_INT(0, mye_shutdown(world));  /* also asserts no leaks */
 ```
 
 One track plays at a time; starting another stops the first. `mye_music_current`
@@ -1505,12 +1800,66 @@ returns what is playing or paused, and a zero handle for neither — a
 non-looping track that reaches its end clears itself, so you can watch for it:
 
 ```c test name=music-current-track
+///- /* Hidden: the headless world (§20), and the two tracks made real under
+///-  * TMPDIR -- the loader insists a path exists with or without a device,
+///-  * and without one nothing decodes them, so any bytes will do. */
+///- ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
+///- ASSERT_TRUE(world != NULL);
+///- char cwd[512], dir[512];
+///- snprintf(cwd, sizeof cwd, "%s", GetWorkingDirectory());
+///- const char *tmpdir = getenv("TMPDIR");
+///- snprintf(dir, sizeof dir, "%s/mye_tutorial_audio",
+///-          tmpdir != NULL && tmpdir[0] != '\0' ? tmpdir : "/tmp");
+///- if (!DirectoryExists(dir)) MakeDirectory(dir);
+///- ASSERT_TRUE(ChangeDirectory(dir));
+///- if (!DirectoryExists("audio")) MakeDirectory("audio");
+///- unsigned char one_byte[1] = { 0 };
+///- ASSERT_TRUE(SaveFileData("audio/theme.ogg", one_byte, 1));
+///- ASSERT_TRUE(SaveFileData("audio/fanfare.ogg", one_byte, 1));
 mye_music theme = mye_music_load(world, "audio/theme.ogg");
+///- mye_music fanfare = mye_music_load(world, "audio/fanfare.ogg");
+///- ASSERT_TRUE(ChangeDirectory(cwd));   /* nothing below touches the disk */
+///- ASSERT_TRUE(mye_music_valid(world, theme));
+///- ASSERT_TRUE(mye_music_valid(world, fanfare));
+///- ASSERT_TRUE(theme.index != fanfare.index);
+///- /* One track at a time: starting the fanfare stops the theme rather than
+///-  * layering over it, and `current` is the one that won. */
+///- mye_music_play_ex(world, theme, 0.6f, true);
+///- mye_music_play(world, fanfare);
+///- ASSERT_EQ_INT((int)fanfare.index, (int)mye_music_current(world).index);
+///- ASSERT_EQ_INT((int)fanfare.generation,
+///-               (int)mye_music_current(world).generation);
+///- /* "playing OR paused": pausing does not clear what is current. */
+///- mye_music_pause(world);
+///- ASSERT_TRUE(mye_music_paused(world));
+///- ASSERT_EQ_INT((int)fanfare.generation,
+///-               (int)mye_music_current(world).generation);
+///- mye_music_resume(world);
+///- /* Headless there is no device clock, so no track ever reaches its end on
+///-  * its own (see audio/audio.c) -- ending it by hand leaves exactly the
+///-  * state a finished track leaves, which is the zero handle the branch
+///-  * below watches for. */
+///- mye_music_stop(world);
+///- ASSERT_EQ_INT(0, (int)mye_music_current(world).generation);
 
 if (mye_music_current(world).generation == 0) {
     /* the fanfare finished; back to the level theme */
     mye_music_play_ex(world, theme, 0.6f, true);
 }
+///- /* The branch really was taken, and the level theme is what plays now --
+///-  * looping, at the volume asked for. */
+///- ASSERT_EQ_INT((int)theme.generation,
+///-               (int)mye_music_current(world).generation);
+///- const MyeAudio *audio = ecs_singleton_get(world, MyeAudio);
+///- ASSERT_TRUE(audio->music.loop);
+///- ASSERT_NEAR(0.6, audio->music.volume, 1e-6);
+///- /* Releasing the playing track is safe -- the handle stops resolving and
+///-  * the engine drops its bookkeeping on the next frame. */
+///- mye_music_release(world, theme);
+///- mye_music_release(world, fanfare);
+///- mye_progress(world, 1.0f / 60.0f);
+///- ASSERT_EQ_INT(0, (int)mye_music_current(world).generation);
+///- ASSERT_EQ_INT(0, mye_shutdown(world));  /* also asserts no leaks */
 ```
 
 Muting silences music without pausing it, so a muted track keeps its place —
@@ -1594,6 +1943,21 @@ everything there applies: `MyeCameraFollow` to chase something,
 Two things are 3D-specific:
 
 ```c test name=camera3d-aim-and-fov
+///- /* Hidden: exactly the case the comment claims to survive -- a camera
+///-  * bolted to a vehicle that has moved and turned. look_at reads the
+///-  * parent's world matrix, so the vehicle is propagated first (one
+///-  * mye_progress); aiming before that would see an identity parent. */
+///- ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
+///- ASSERT_TRUE(world != NULL);
+///- ecs_entity_t vehicle = mye_spawn_3d(world, (Vector3){ 20.0f, 0.0f, -5.0f });
+///- ecs_set(world, vehicle, MyeRotation3D,
+///-         { QuaternionFromAxisAngle((Vector3){ 0.0f, 1.0f, 0.0f },
+///-                                   PI / 3.0f) });
+///- ecs_entity_t camera = mye_camera3d_spawn(world, (Vector3){ 0.0f, 3.0f, 8.0f },
+///-                                          (Vector3){ 0.0f, 0.0f, 0.0f },
+///-                                          60.0f);
+///- mye_set_parent(world, camera, vehicle);
+///- mye_progress(world, 1.0f / 60.0f);
 /* Aim it. The target is a WORLD point, converted into the camera's own space
  * internally -- so this stays correct for a camera parented to a moving,
  * turning vehicle. */
@@ -1603,6 +1967,24 @@ mye_camera_look_at(world, camera, (Vector3){ 0.0f, 1.0f, 0.0f });
  * sprint is the classic speed effect. Clamped, because a zero fov renders
  * nothing and looks like a crash. */
 mye_camera_set_fov(world, camera, 45.0f);
+///- mye_progress(world, 1.0f / 60.0f);
+///- Camera3D view;
+///- ASSERT_TRUE(mye_camera3d_resolve(world, camera, &view));
+///- /* Aimed at the WORLD point (0,1,0) even though the camera's parent is
+///-  * displaced and yawed 60 degrees: drop the conversion into camera space
+///-  * and the two directions stop agreeing. */
+///- Vector3 aimed = Vector3Normalize(Vector3Subtract(view.target,
+///-                                                  view.position));
+///- Vector3 wanted = Vector3Normalize(
+///-     Vector3Subtract((Vector3){ 0.0f, 1.0f, 0.0f }, view.position));
+///- ASSERT_NEAR(1.0f, Vector3DotProduct(aimed, wanted), 0.005);
+///- /* The fov set above is the fov the pass would project with... */
+///- ASSERT_NEAR(45.0f, mye_camera_get_fov(world, camera), 0.001);
+///- ASSERT_NEAR(45.0f, view.fovy, 0.001);
+///- /* ...and "clamped" means a zero fov is refused, not obeyed. */
+///- mye_camera_set_fov(world, camera, 0.0f);
+///- ASSERT_TRUE(mye_camera_get_fov(world, camera) > 0.0f);
+///- ASSERT_EQ_INT(0, mye_shutdown(world));  /* also asserts no leaks */
 ```
 
 An orbit camera is a camera parented to an invisible pivot: rotate the pivot
@@ -1863,14 +2245,26 @@ that a run produced zero errors, which is a cheap and surprisingly effective
 smoke test.
 
 ```c test name=log-counts
+///- /* Hidden: the counters are process-global and cumulative since startup,
+///-  * and other tests in this binary log too -- so zero them first, and put
+///-  * the level back afterwards so nothing is left behind for the next test. */
+///- const mye_log_level level_before = mye_log_get_level();
+///- mye_log_reset_counts();
 int orbs = 8, mines = 5;
 
 mye_log_set_level(MYE_LOG_INFO);
+///- ASSERT_EQ_INT(MYE_LOG_INFO, mye_log_get_level());
 mye_log_info("play: %d orbs, %d mines", orbs, mines);
 mye_log_warn("no controller found; keyboard only");
 
 mye_log_counts counts = mye_log_get_counts();
+///- ASSERT_EQ_U64(1, counts.info);   /* the info line was counted */
+///- ASSERT_EQ_U64(1, counts.warn);   /* and so was the warn line */
+///- ASSERT_EQ_U64(0, counts.trace);  /* counted per level, not one lump total */
+///- ASSERT_EQ_U64(0, counts.debug);
+///- ASSERT_EQ_U64(0, counts.error);  /* "a run produced zero errors" */
 if (counts.error > 0) return;             /* fail the test */
+///- mye_log_set_level(level_before);
 ```
 
 Point it wherever you like — a file, an in-game console, a test buffer:
@@ -2196,16 +2590,41 @@ action), and a browser can only ever be a client.
 Opening a connection is one call, and handing it to the engine is one more:
 
 ```c test name=net-register
+///- /* Hidden: a headless world, and nothing listening on 9010 -- what is
+///-  * under test is who gets pumped, not whether the dial succeeds. */
+///- ecs_world_t *world = mye_init(&(mye_config){ .headless = true });
+///- ASSERT_TRUE(world != NULL);
+///- const MyeNetStatus *net = ecs_singleton_get(world, MyeNetStatus);
+///- ASSERT_TRUE(net != NULL);
+///- ASSERT_EQ_INT(0, net->count);   /* the module exists and pumps nothing */
 mye_net_conn *conn = mye_net_connect(mye_allocator_of(world),
                                      "ws://localhost:9010/", NULL);
 if (conn != NULL) {
     mye_net_register(world, conn);   /* pumped from now on */
 }
+///- ASSERT_TRUE(conn != NULL);      /* connect never blocks and never fails
+///-                                  * on a URL it can parse */
+///- net = ecs_singleton_get(world, MyeNetStatus);
+///- ASSERT_EQ_INT(1, net->count);   /* the registry IS the singleton */
+///- ASSERT_EQ_PTR(conn, net->conns[0]);
+///- /* "Pumped from now on" means by mye_progress, once per frame. */
+///- mye_progress(world, 1.0f / 60.0f);
+///- mye_progress(world, 1.0f / 60.0f);
+///- net = ecs_singleton_get(world, MyeNetStatus);
+///- ASSERT_EQ_U64(2, net->pumps);
 
 /* ... and at shutdown, in this order. Unregister first, or the pump will
  * service freed memory next frame. */
 mye_net_unregister(world, conn);
 mye_net_destroy(conn);
+///- /* Done in that order, the pump has already let go: the registry is empty
+///-  * and the status is back to IDLE, so the frame below services nothing
+///-  * freed -- which is what the sanitizers are here to confirm. */
+///- net = ecs_singleton_get(world, MyeNetStatus);
+///- ASSERT_EQ_INT(0, net->count);
+///- ASSERT_EQ_INT(MYE_NET_IDLE, (int)net->status);
+///- mye_progress(world, 1.0f / 60.0f);
+///- ASSERT_EQ_INT(0, mye_shutdown(world));  /* also asserts no leaks */
 ```
 
 `mye_net_register` is the whole design of the module. The engine services the
@@ -2271,12 +2690,17 @@ What the engine hands you is the arithmetic — wait a little, then longer, then
 give up:
 
 ```c test name=reconnect-backoff
+///- /* Hidden: the fragment runs inside a system, where `world` is in scope.
+///-  * Nothing is connected here, so the branch that uses it is never taken --
+///-  * but it still has to compile, which is half of what this test checks. */
+///- ecs_world_t *world = NULL;
 static mye_net_backoff backoff;
 mye_net_backoff_init(&backoff, &(mye_net_backoff_config){
     .first_delay = 0.5, .max_delay = 5.0, .factor = 2.0, .jitter = 0.2 });
 
 mye_net_conn *conn = NULL; /* whatever you are holding */
 double dt = 1.0 / 60.0;
+///- ASSERT_EQ_INT(MYE_NET_ERROR, mye_net_status_of(conn)); /* not OPEN: the else runs */
 
 if (mye_net_status_of(conn) == MYE_NET_OPEN) {
     mye_net_backoff_connected(&backoff);          /* back to the first rung */
@@ -2288,6 +2712,17 @@ if (mye_net_status_of(conn) == MYE_NET_OPEN) {
         /* ... redial and register the new one ... */
     }
 }
+///- /* One frame of dt is nowhere near the half second the first rung asks
+///-  * for, so `ready` above was false and the wait is still counting down. */
+///- ASSERT_TRUE(mye_net_backoff_remaining(&backoff) > 0.0);
+///- ASSERT_TRUE(mye_net_backoff_remaining(&backoff) <= 0.5);  /* first rung, jittered */
+///- ASSERT_TRUE(mye_net_backoff_ready(&backoff, 1.0));   /* due now: true, once... */
+///- ASSERT_FALSE(mye_net_backoff_ready(&backoff, 1.0));  /* ...and only once */
+///- /* And "back to the first rung" is a claim about the NEXT wait: without
+///-  * the reconnect it would be the doubled 1.0 rung, not 0.5 again. */
+///- mye_net_backoff_connected(&backoff);
+///- mye_net_backoff_failed(&backoff);
+///- ASSERT_TRUE(mye_net_backoff_remaining(&backoff) <= 0.5);
 ```
 
 It is a pure state machine: no clock, no socket, `dt` from the caller. That is

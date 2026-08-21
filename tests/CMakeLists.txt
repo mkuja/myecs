@@ -48,6 +48,30 @@ mye_add_unit_test(harness)
 mye_add_unit_test(alloc engine)
 mye_add_unit_test(rl_alloc engine)
 
+# Tutorial doctests: the named `c test` blocks in TUTORIAL.mdt, extracted
+# into one generated suite so the tutorial's examples run -- hidden
+# assertions included -- under every configuration like any other unit test.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+    set(mye_tutorial_c ${CMAKE_CURRENT_BINARY_DIR}/test_tutorial.c)
+    add_custom_command(
+        OUTPUT ${mye_tutorial_c}
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tools/check_tutorial.py extract
+                --out ${mye_tutorial_c}
+        DEPENDS ${CMAKE_SOURCE_DIR}/TUTORIAL.mdt
+                ${CMAKE_SOURCE_DIR}/tools/check_tutorial.py
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Extracting tutorial tests from TUTORIAL.mdt"
+        VERBATIM)
+    add_executable(test_unit_tutorial ${mye_tutorial_c})
+    target_link_libraries(test_unit_tutorial PRIVATE mye_test_harness engine)
+    add_test(NAME unit_tutorial COMMAND test_unit_tutorial)
+    set_tests_properties(unit_tutorial PROPERTIES
+        TIMEOUT 60
+        ENVIRONMENT "${MYE_TEST_ENVIRONMENT}")
+endif()
+
 mye_add_unit_test(input engine)
 mye_add_unit_test(collision engine)
 mye_add_unit_test(sprite_anim engine)

@@ -171,10 +171,11 @@ bool mye_sound_valid(const ecs_world_t *world, mye_sound handle);
  * held in memory whole like a sound. Deduped by path and refcounted like the
  * rest; playback lives in audio/audio.h.
  *
- * Whatever raylib can stream is accepted -- OGG and WAV in practice, and the
- * extension is never inspected here: raylib sniffs the file, and gating on
- * ".ogg" would only teach the engine a shorter list of formats than the
- * decoder actually has.
+ * Whatever raylib can stream is accepted -- OGG and WAV in practice. The
+ * extension is never inspected here: gating on ".ogg" would only teach the
+ * engine a shorter list of formats than the decoder actually has. raylib does
+ * inspect it -- LoadMusicStream picks its decoder by extension -- so the name
+ * has to match the contents.
  *
  * Headless (or with no audio device) the slot is recorded without a stream,
  * so scene bookkeeping and the playback state machine stay testable without

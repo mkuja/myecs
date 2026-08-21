@@ -63,7 +63,7 @@ if [[ "$quick" != "--quick" ]]; then
         printf '  skipped: emcc is not on PATH (source ~/emsdk/emsdk_env.sh)\n'
     fi
 
-    step "TUTORIAL.md code blocks"
+    step "Tutorial code blocks (TUTORIAL.mdt -> TUTORIAL.md)"
     python3 tools/check_tutorial.py || fail "tutorial code blocks"
 
     step "Examples (bounded runs, leak-checked on exit)"
